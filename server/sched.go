@@ -209,7 +209,6 @@ func (s *Scheduler) processPending(ctx context.Context) {
 							numParallel = defaultParallel
 						}
 
-
 						if loadedCount == 0 {
 							slog.Debug("cpu mode with first model, loading")
 							s.loadFn(pending, ggml, gpus, numParallel)

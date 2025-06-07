@@ -172,28 +172,44 @@ This inconsistency represents a fundamental design decision point that requires 
 
 ## RESOLUTION UPDATE (June 7, 2025)
 
-### Issue Status: PARTIALLY RESOLVED
+### Issue Status: REGRESSIONS INTRODUCED
 
-**RESOLVED**: The design inconsistency between `GenerateHandler` and `ChatHandler` has been resolved by implementing the unified `calculateAndSetDynamicNumCtx` function.
+**PREVIOUSLY RESOLVED**: The design inconsistency between `GenerateHandler` and `ChatHandler` was resolved by implementing the unified `calculateAndSetDynamicNumCtx` function. The `TestDynamicNumCtxCalculation` test expectations were updated, and the mock server capture issue was fixed, leading to its successful passing.
 
-**NEW ISSUE IDENTIFIED**: Test expectations are based on outdated requirements. Tests expect `numPredict: nil` to default to 1024 tokens, but the current implementation correctly follows PLAN.md where `nil` means use remaining context (`modelMaxCtx - messageLength`).
+**NEW REGRESSIONS IDENTIFIED**: Recent changes have introduced new test failures across various test suites. These regressions need to be investigated and resolved to ensure overall system stability.
 
-### Updated System State
+### Current System State
 
-- **GenerateHandler**: ✅ Has dynamic NumCtx calculation
-- **ChatHandler**: ✅ Has dynamic NumCtx calculation (via unified `calculateAndSetDynamicNumCtx`)
-- **Tests**: ❌ Expect outdated behavior (1024 default vs remaining context)
-- **Documentation**: ✅ Behavior specified in PLAN.md
-- **Mock Server**: ❌ Not capturing final scheduler calls properly
+- **Dynamic NumCtx Calculation**: ✅ Implemented and verified for `GenerateHandler` and `ChatHandler`.
+- **`TestDynamicNumCtxCalculation`**: ✅ Passing.
+- **Overall Test Suite**: ❌ Multiple failures detected.
 
-### Test Expectation Corrections Needed
+### Regressions to Investigate
 
-1. **Update test cases** to expect remaining context calculation instead of fixed 1024 default
-2. **Fix mock server capture timing** to properly validate dynamic NumCtx values
-3. **Align all test expectations** with current PLAN.md specifications
+The following tests are now failing:
 
-### Test Cases Requiring Updates
+- `TestCreateFromBin`
+- `TestCreateFromModel`
+- `TestCreateRemovesLayers`
+- `TestCreateUnsetsSystem`
+- `TestCreateMergeParameters`
+- `TestCreateReplacesMessages`
+- `TestCreateTemplateSystem`
+- `TestCreateLicenses`
+- `TestCreateDetectTemplate` (including subtests)
+- `TestDelete`
+- `TestGenerateChat` (including subtests)
+- `TestDynamicNumCtxGenerateHandler` (including subtests)
+- `TestNumCtxNotScaledByNumParallel` (including subtests)
+- `TestList`
+- `TestRoutes` (including subtests)
+- `TestManifestCaseSensitivity`
+- `TestShow`
+- `TestRequestsSameModelSameRequest`
 
-- `"short prompt with default response"`: Expected 2048 → Should expect 8192 (remaining context)
-- `"NumPredict -1 uses model max"`: Already correct at 8192
-- Other cases need review for consistency with PLAN.md requirements
+### Next Steps
+
+1.  **Deeper Investigation via Debug Mode**: Based on initial analysis and user feedback, the widespread regressions suggest a fundamental issue, potentially a "simple and stupid" oversight related to how `numParallel` or `NumCtx` values are passed and interpreted. A deeper investigation is required.
+2.  **Create Debug Subtasks**: For each category of failing tests, create a specific subtask for the `debug` mode, instructing it to investigate the exact cause of failures, focusing on `NumCtx` and `numParallel` values, and the impact of the Spongebob truncation method.
+3.  **Update Plan and TODO**: Revise `PLAN.md` to reflect this new investigative approach and update `TODO.md` with the new subtasks.
+4.  **Formulate a Revised Plan**: Once debug mode provides more information, formulate a revised, detailed plan to address each regression.

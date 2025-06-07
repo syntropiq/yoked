@@ -1,149 +1,108 @@
-# Plan: Dynamic `NumCtx` Sizing Implementation
+# Plan: Regression Investigation and Resolution
 
 ## Objective
 
-Implement dynamic `NumCtx` sizing based on incoming message length + `max_response_tokens` (or default), rounded up to the nearest multiple of 1024, capped at the model's maximum context length. This will disregard any `num_ctx` value provided in the incoming request.
+Conduct a thorough investigation into the widespread test regressions, focusing on potential "simple and stupid" oversights related to `NumCtx` and `numParallel` handling, and the impact of the Spongebob truncation method. Based on the findings, formulate a revised, detailed plan for resolution.
 
-## Assumptions
+## Current Status
 
-*   The `context_length` in the GGUF metadata (`kvData.ContextLength()`) is the absolute maximum context length the model can support.
-*   `NumPredict` (max response tokens) defaults to -1. If `NumPredict` is -1 or not set, it will be calculated as `modelMaxCtx - messageLength`, ensuring a minimum of 1024 tokens.
+The dynamic `NumCtx` calculation has been unified between `GenerateHandler` and `ChatHandler`, and `TestDynamicNumCtxCalculation` is passing. However, numerous other tests are now failing, indicating deeper architectural or implementation issues.
 
-## Proposed Changes and Implementation Steps
+## Investigation Strategy (Leveraging Debug Mode)
 
-1.  **Identify the Calculation Point:** The dynamic `NumCtx` will be calculated in `server/routes.go` within the `GenerateHandler` and `EmbedHandler` functions, *before* calling `s.scheduleRunner`.
+Instead of immediately attempting fixes, the primary goal is to gather more precise information about the nature of the regressions. This will involve creating targeted subtasks for the `debug` mode.
 
-2.  **Retrieve Model Max Context Length:**
-    *   In `server/routes.go`, `kvData.ContextLength()` will be retrieved for both `GenerateHandler` and `EmbedHandler`. This will be our `modelMaxCtx`.
+### Phase 1: Core `NumCtx` and `numParallel` Interaction
 
-3.  **Determine `maxResponseTokens`:**
-    *   For `GenerateHandler`:
-        *   If `req.Options.NumPredict` is explicitly set and positive, that value will be used.
-        *   If `req.Options.NumPredict` is -1 or not set:
-            *   Calculate `remainingContext = modelMaxCtx - messageLength`.
-            *   `maxResponseTokens = max(remainingContext, 1024)`. This ensures at least 1024 tokens for response, or more if there's ample remaining context.
-        *   `maxResponseTokens` will be capped at `modelMaxCtx`.
+*   **Hypothesis:** The `NumCtx` value might still be incorrectly scaled or passed, or `numParallel` might be unexpectedly `0` or `1` in certain contexts, leading to incorrect resource allocation or test expectations. The Spongebob truncation might also be interacting unexpectedly.
+*   **Debug Subtasks:**
+    *   **Subtask 1: `TestNumCtxNotScaledByNumParallel` Investigation**
+        *   **Goal:** Determine why `TestNumCtxNotScaledByNumParallel` is failing.
+        *   **Instructions for Debug Mode:**
+            *   Add extensive logging within [`server/sched.go`](server/sched.go) (specifically `pickBestFullFitByLibrary` and `pickBestPartialFitByLibrary`) to log the values of `req.opts.NumCtx`, `req.origNumCtx`, `p` (numParallel), and the result of any scaling operations.
+            *   Log the parameters passed to `llm.PredictServerFit` and `llm.EstimateGPULayers`.
+            *   Run `TestNumCtxNotScaledByNumParallel` in isolation and capture the detailed log output.
+            *   Report on the exact values of these variables at critical points and identify where the scaling (if any) is occurring or where `NumCtx` is being misinterpreted.
+    *   **Subtask 2: `TestDynamicNumCtxGenerateHandler` Investigation**
+        *   **Goal:** Understand why subtests within `TestDynamicNumCtxGenerateHandler` are failing, despite `TestDynamicNumCtxCalculation` passing.
+        *   **Instructions for Debug Mode:**
+            *   Add logging within [`server/routes.go`](server/routes.go) (specifically `calculateAndSetDynamicNumCtx` and its callers in `GenerateHandler`) to log `messageLength`, `maxResponseTokens`, `modelMaxCtx`, `calculatedNumCtx`, and `finalNumCtx`.
+            *   Enhance the mock server in [`server/routes_generate_test.go`](server/routes_generate_test.go) to log the `api.Options` (especially `NumCtx`) it receives from `s.scheduleRunner`.
+            *   Run `TestDynamicNumCtxGenerateHandler` with all subtests and capture detailed log output.
+            *   Report on the calculated `NumCtx` values and the values received by the mock server, highlighting any discrepancies.
 
-4.  **Calculate `messageLength`:**
-    *   For `GenerateHandler`: The `req.Prompt` and any `req.Messages` (after template application if `req.Raw` is false) will be tokenized to get the `messageLength`. This will involve calling `r.Tokenize`.
-    *   For `EmbedHandler`: Each input string in `req.Input` will be tokenized to get its length. The `NumCtx` will be calculated per input string.
+### Phase 2: Model Creation and Management Regressions
 
-5.  **Implement Dynamic `NumCtx` Calculation:**
-    *   The formula will be: `calculatedNumCtx = messageLength + maxResponseTokens`.
-    *   `calculatedNumCtx` will be rounded up to the nearest multiple of 1024 using `((calculatedNumCtx + 1023) / 1024) * 1024`.
-    *   `calculatedNumCtx` will be capped at `modelMaxCtx`: `finalNumCtx = min(calculatedNumCtx, modelMaxCtx)`.
+*   **Hypothesis:** Changes related to dynamic `NumCtx` or other recent modifications might have inadvertently affected how models are created, their metadata is processed, or how they are managed in the system.
+*   **Debug Subtasks:**
+    *   **Subtask 3: `TestCreate*` Tests Investigation**
+        *   **Goal:** Pinpoint the exact cause of failures in `TestCreateFromBin`, `TestCreateFromModel`, `TestCreateRemovesLayers`, `TestCreateUnsetsSystem`, `TestCreateMergeParameters`, `TestCreateReplacesMessages`, `TestCreateTemplateSystem`, `TestCreateLicenses`, `TestCreateDetectTemplate`.
+        *   **Instructions for Debug Mode:**
+            *   For each failing `TestCreate*` test, add logging within [`server/create.go`](server/create.go) to trace the flow of model metadata (e.g., `context_length`, `template`, `system`, `parameters`, `licenses`, `layers`) as it's read from the GGUF, processed, and stored.
+            *   Log the expected vs. actual values of these properties at various stages.
+            *   Run these tests individually and capture detailed logs.
+            *   Report on the specific discrepancies found for each test.
+    *   **Subtask 4: `TestManifestCaseSensitivity` Investigation**
+        *   **Goal:** Determine the root cause of the `TestManifestCaseSensitivity` failure.
+        *   **Instructions for Debug Mode:**
+            *   Add logging in the manifest parsing logic (likely in `model/` or `parser/`) to show how model names/paths are being compared and if case sensitivity is being correctly applied or ignored where expected.
+            *   Run the test and report on the exact comparison logic and values.
 
-6.  **Override `req.Options.NumCtx`:**
-    *   `req.Options.Runner.NumCtx` will be set to `finalNumCtx` before calling `s.scheduleRunner`.
+### Phase 3: Chat Generation and Truncation
 
-7.  **Adjust Scheduler Logic (`server/sched.go`):**
-    *   **Remove `NumCtx` scaling in `pickBestFullFitByLibrary`**: The line `req.opts.NumCtx = req.origNumCtx * p` (around line 783) must be **removed**. This scaling is incorrect as `NumCtx` should represent the per-request context, not a scaled value for parallelism.
-    *   **Adjust `llm.PredictServerFit` call**: Instead of modifying `req.opts.NumCtx` within `pickBestFullFitByLibrary`, `llm.PredictServerFit` (and subsequently `llm.EstimateGPULayers`) should be called with `req.origNumCtx` (the unscaled, dynamically calculated `NumCtx` from `routes.go`) and `p` (the `numParallel` value) as separate parameters. This ensures that memory estimation correctly accounts for both the per-request context and the parallelism factor without incorrectly scaling `NumCtx`.
-    *   The `pickBestPartialFitByLibrary` function will also need to be reviewed to ensure similar scaling is not occurring there.
+*   **Hypothesis:** The "Spongebob truncation" or the tokenization process for chat messages, especially with interleaved system messages, might be misbehaving with the new dynamic `NumCtx`.
+*   **Debug Subtasks:**
+    *   **Subtask 5: `TestGenerateChat (messages_with_interleaved_system)` Investigation**
+        *   **Goal:** Understand why `TestGenerateChat (messages_with_interleaved_system)` is failing.
+        *   **Instructions for Debug Mode:**
+            *   Add logging within [`server/routes.go`](server/routes.go) (specifically in `ChatHandler` and the `calculateAndSetDynamicNumCtx` call) to log the raw `req.Messages`, the templated prompt, and the tokenized `messageLength`.
+            *   Add logging within [`server/prompt.go`](server/prompt.go) (specifically `chatPrompt`) to log the `opts.NumCtx` received and the state of the prompt before and after truncation.
+            *   Run the test and report on the exact prompt content, token counts, and truncation behavior.
 
-8.  **Review `server/prompt.go` (Spongebob Truncation):**
-    *   The `chatPrompt` function already uses `opts.NumCtx` for its truncation logic. By overriding `opts.NumCtx` earlier in `server/routes.go`, the Spongebob truncation will automatically adapt to the new dynamic context size. No direct changes are expected here.
+### Phase 4: Scheduler Concurrency and Model Request Handling
 
-9.  **Review `llm/server.go`:**
-    *   The `NewLlamaServer` function already takes `opts.NumCtx` and `numParallel` as separate parameters. The `--ctx-size` argument will receive the dynamically calculated `NumCtx`. The `EstimateGPULayers` function will use this `NumCtx` and `numParallel` for its calculations. No direct changes are expected here, but it's crucial to ensure `EstimateGPULayers` correctly interprets `NumCtx` as the per-request context and `numParallel` as the internal parallelism factor.
+*   **Hypothesis:** The scheduler's ability to handle concurrent requests for the same model might be affected by the dynamic `NumCtx` or other recent changes.
+*   **Debug Subtasks:**
+    *   **Subtask 6: `TestRequestsSameModelSameRequest` Investigation**
+        *   **Goal:** Determine why `TestRequestsSameModelSameRequest` is failing.
+        *   **Instructions for Debug Mode:**
+            *   Add logging within [`server/sched.go`](server/sched.go) to trace how requests for the same model are queued, processed, and if model instances are being correctly reused or reloaded.
+            *   Log the `NumCtx` and `numParallel` values associated with each request as it enters the scheduler.
+            *   Run the test and report on the sequence of events and any unexpected behavior in request handling or resource allocation.
 
-## Mermaid Diagram: Dynamic `NumCtx` Flow
+### Phase 5: General Model Lifecycle Tests
 
-```mermaid
-graph TD
-    A[Incoming API Request] --> B{server/routes.go: GenerateHandler/EmbedHandler}
-    B -- Get modelMaxCtx from GGUF --> C[kvData.ContextLength()]
-    B -- Determine messageLength (tokenize prompt/input) --> D[messageLength]
-    B -- Determine maxResponseTokens (req.Options.NumPredict or default 1024) --> E[maxResponseTokens]
-    F{Calculate calculatedNumCtx = messageLength + maxResponseTokens} --> G[Round up to nearest 1024]
-    G --> H[Cap at modelMaxCtx: finalNumCtx = min(calculatedNumCtx, modelMaxCtx)]
-    H --> I[Override req.Options.Runner.NumCtx = finalNumCtx]
-    I --> J[s.scheduleRunner()]
-    J -- Passes opts (with finalNumCtx) --> K[server/sched.go: GetRunner()]
-    K -- Stores origNumCtx (now finalNumCtx) --> L[LlmRequest]
-    L --> M[server/sched.go: processPending()]
-    M -- REMOVE NumCtx * numParallel scaling --> N[Pass finalNumCtx to llm.NewLlamaServer]
-    N -- Passes numParallel separately --> O[llm.NewLlamaServer (Backend)]
-    O -- Passes --ctx-size (finalNumCtx) --> P[GGML Backend]
-    P -- Uses finalNumCtx for KV Cache, Graph Size, RoPE --> Q[Model Execution]
-    M -- (Spongebob Truncation uses finalNumCtx) --> R[server/prompt.go: chatPrompt()]
-```
+*   **Hypothesis:** `TestDelete`, `TestList`, and `TestShow` failures are likely downstream effects of issues in model creation or management.
+*   **Debug Subtasks:**
+    *   **Subtask 7: `TestDelete`, `TestList`, `TestShow` Investigation**
+        *   **Goal:** Confirm if these failures are secondary to `TestCreate*` issues, or if they represent independent problems.
+        *   **Instructions for Debug Mode:**
+            *   Run these tests after the `TestCreate*` issues are investigated (but not necessarily fixed).
+            *   If they still fail, add logging to their respective handlers in [`server/routes.go`](server/routes.go) and underlying functions to trace model lookup, deletion, and listing operations.
+            *   Report on any specific errors or unexpected behavior.
 
-## CRITICAL DESIGN INCONSISTENCY RESOLUTION PLAN
-
-**Goal:** Unify `NumCtx` calculation across `GenerateHandler` and `ChatHandler` in `server/routes.go` and update relevant tests.
-
-**Detailed Plan:**
-
-1.  **Refactor Dynamic `NumCtx` Calculation into a Reusable Function:**
-    *   Extract the `NumCtx` calculation logic from `GenerateHandler` into a new, private helper function (e.g., `calculateAndSetDynamicNumCtx`) within [`server/routes.go`](server/routes.go). This function will take the necessary parameters (e.g., `modelMaxCtx`, `prompt`, `req.Options`, `s.scheduleRunner` related parameters for tokenization) and return the updated `api.Options` or directly modify `req.Options`.
-    *   This promotes code reuse and reduces duplication.
-
-2.  **Integrate Reusable Function into `ChatHandler`:**
-    *   Call the newly created helper function within `ChatHandler` in [`server/routes.go`](server/routes.go) to perform the dynamic `NumCtx` calculation before calling `s.scheduleRunner`.
-    *   Ensure that `ChatHandler` correctly handles message tokenization for chat messages (which might involve iterating through `req.Messages` and applying the chat template if `req.Raw` is false).
-
-3.  **Update `server/routes_generate_test.go`:**
-    *   Review and modify existing tests that call `ChatHandler` but expect `GenerateHandler` behavior. These tests should now pass as `ChatHandler` will have the dynamic `NumCtx` calculation.
-    *   Add new test cases specifically for `ChatHandler` to verify its dynamic `NumCtx` calculation, including scenarios with varying message lengths, `NumPredict` values, rounding, and capping.
-    *   Ensure the mock server captures the `api.Options` passed to it for assertion in `ChatHandler` tests.
-
-**Mermaid Diagram: Unified Dynamic `NumCtx` Flow**
+## Revised Mermaid Diagram: Regression Investigation Flow
 
 ```mermaid
 graph TD
-    A[Incoming API Request] --> B{server/routes.go}
-    B -- /api/generate --> C[GenerateHandler]
-    B -- /api/chat --> D[ChatHandler]
+    A[Start: Analyze Failing Tests & User Feedback] --> B{Identify Regression Categories}
+    B -- NumCtx/numParallel --> C[Phase 1: Core NumCtx/numParallel Interaction]
+    B -- Model Creation/Management --> D[Phase 2: Model Creation/Management Regressions]
+    B -- Chat/Truncation --> E[Phase 3: Chat Generation & Truncation]
+    B -- Scheduler Concurrency --> F[Phase 4: Scheduler Concurrency]
+    B -- General Lifecycle --> G[Phase 5: General Model Lifecycle Tests]
 
-    C --> E[Call calculateAndSetDynamicNumCtx()]
-    D --> E
+    C --> C1[Debug Subtask 1: TestNumCtxNotScaledByNumParallel]
+    C --> C2[Debug Subtask 2: TestDynamicNumCtxGenerateHandler]
+    D --> D1[Debug Subtask 3: TestCreate* Tests]
+    D --> D2[Debug Subtask 4: TestManifestCaseSensitivity]
+    E --> E1[Debug Subtask 5: TestGenerateChat (interleaved_system)]
+    F --> F1[Debug Subtask 6: TestRequestsSameModelSameRequest]
+    G --> G1[Debug Subtask 7: TestDelete, TestList, TestShow]
 
-    E -- Get modelMaxCtx from GGUF --> F[kvData.ContextLength()]
-    E -- Determine messageLength (tokenize prompt/input/messages) --> G[messageLength]
-    E -- Determine maxResponseTokens (req.Options.NumPredict or default 1024) --> H[maxResponseTokens]
-    I{Calculate calculatedNumCtx = messageLength + maxResponseTokens} --> J[Round up to nearest 1024]
-    J --> K[Cap at modelMaxCtx: finalNumCtx = min(calculatedNumCtx, modelMaxCtx)]
-    K --> L[Override req.Options.Runner.NumCtx = finalNumCtx]
-
-    L --> M[s.scheduleRunner()]
-    M -- Passes opts (with finalNumCtx) --> N[server/sched.go: GetRunner()]
-    N -- Stores origNumCtx (now finalNumCtx) --> O[LlmRequest]
-    O --> P[server/sched.go: processPending()]
-    P -- REMOVE NumCtx * numParallel scaling --> Q[Pass finalNumCtx to llm.NewLlamaServer]
-    Q -- Passes numParallel separately --> R[llm.NewLlamaServer (Backend)]
-    R -- Passes --ctx-size (finalNumCtx) --> S[GGML Backend]
-    S -- Uses finalNumCtx for KV Cache, Graph Size, RoPE --> T[Model Execution]
-    P -- (Spongebob Truncation uses finalNumCtx) --> U[server/prompt.go: chatPrompt()]
+    C1 & C2 & D1 & D2 & E1 & F1 & G1 --> H[Collect Debug Reports]
+    H --> I[Architect: Synthesize Debug Findings]
+    I --> J[Architect: Formulate Revised Resolution Plan]
+    J --> K[Update TODO.md with new tasks]
+    K --> L[Signal Completion (attempt_completion)]
 ```
-
-## Test Plan
-
-**Objective:** Identify all test files affected by the dynamic `NumCtx` sizing changes in `server/routes.go` and `server/sched.go`, analyze changed expectations, and formulate a plan for updating these tests.
-
-**Key Areas of Impact:**
-
-1.  **API Request Handling:** Tests that send `GenerateRequest` or `EmbedRequest` and explicitly set `NumCtx` or rely on default `NumCtx` behavior.
-2.  **Scheduler Logic:** Tests that verify how runners are scheduled, loaded, and how `NumCtx` influences resource allocation or parallelism.
-3.  **Prompt Truncation:** Tests that validate the "Spongebob truncation" logic, especially if they rely on a fixed context window.
-
-**Step-by-Step Test Updates:**
-
-1.  **`server/routes_generate_test.go`:**
-    *   **Modify `newMockServer`:** Enhance to capture the `api.Options` passed to it, allowing inspection of the `NumCtx` value sent to the backend.
-    *   **Add New Test Cases:**
-        *   Verify dynamic `NumCtx` calculation with varying prompt lengths and `NumPredict` values (including `-1`).
-        *   Assert that the `mockRunner.CompletionRequest.Options.NumCtx` matches the expected dynamic calculation (message length + `maxResponseTokens`, rounded up to nearest 1024, capped at `modelMaxCtx`).
-        *   Confirm that `NumCtx` provided in the `api.ChatRequest` or `api.GenerateRequest` is disregarded.
-        *   Add a specific test case for `NumPredict = -1` to ensure `maxResponseTokens` defaults to 1024 (or remaining context, capped at `modelMaxCtx`).
-
-2.  **`server/sched_test.go`:**
-    *   **Modify `mockLlm` (or `newServerFn` mock):** Capture `api.Options` and `numParallel` arguments passed to `llm.NewLlamaServer`.
-    *   **Update Assertions:** In relevant tests (e.g., `TestLoad`, `TestRequestsSameModelSameRequest`), assert that the `NumCtx` received by the mock server is the *dynamically calculated* `NumCtx` and *not* scaled by `numParallel`. This confirms the removal of the `NumCtx * numParallel` scaling.
-    *   **Review Memory Estimation Tests:** Ensure existing tests for `EstimateGPULayers` still pass. Consider adding new cases with dynamically calculated `NumCtx` and different `numParallel` values to confirm correct memory accounting.
-
-3.  **`server/prompt_test.go`:**
-    *   No direct changes are expected. The existing tests should continue to pass as `chatPrompt` uses the `opts.NumCtx` provided to it, which will now be the dynamically calculated value.
-
-4.  **`api/client_test.go` and `api/types_test.go`:**
-    *   No changes are expected, as these files do not directly interact with `NumCtx` or `NumPredict` in a way that would be affected by the dynamic sizing.

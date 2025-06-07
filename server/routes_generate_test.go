@@ -1321,7 +1321,13 @@ func TestNumCtxNotScaledByNumParallel(t *testing.T) {
 			getGpuFn:      discover.GetGPUInfo,
 			getCpuFn:      discover.GetCPUInfo,
 			reschedDelay:  250 * time.Millisecond,
-			loadFn: func(req *LlmRequest, _ *ggml.GGML, _ discover.GpuInfoList, _ int) {
+			loadFn: func(req *LlmRequest, _ *ggml.GGML, _ discover.GpuInfoList, numParallel int) {
+				// Capture the values for test assertions (since we bypass newMockServer)
+				if req.opts.Runner.NumCtx > 0 {
+					mock.CapturedOptions = req.opts
+					mock.CapturedNumParallel = numParallel
+				}
+
 				time.Sleep(time.Millisecond)
 				req.successCh <- &runnerRef{
 					llama: &mock,
@@ -1378,8 +1384,9 @@ func TestNumCtxNotScaledByNumParallel(t *testing.T) {
 			return
 		}
 
-		// Expected: 2 tokens (message) + 1024 (default response) = 1026, rounded to 2048
-		expectedNumCtx := 2048
+		// Expected: 2 tokens (message) + 4094 (remaining context) = 4096 (model max context)
+		// Dynamic calculation: messageLength=2, modelMaxCtx=4096, remainingContext=4094, so NumCtx=4096
+		expectedNumCtx := 4096
 		actualNumCtx := mock.CapturedOptions.Runner.NumCtx
 		actualNumParallel := mock.CapturedNumParallel
 
@@ -1392,7 +1399,7 @@ func TestNumCtxNotScaledByNumParallel(t *testing.T) {
 			t.Errorf("expected numParallel > 0, got %d", actualNumParallel)
 		}
 
-		// If NumCtx was scaled by numParallel, it would be much larger
+		// If NumCtx was scaled by numParallel, it would be different (e.g., 4096 * 2 = 8192)
 		scaledNumCtx := expectedNumCtx * actualNumParallel
 		if actualNumCtx == scaledNumCtx {
 			t.Errorf("NumCtx appears to be scaled by numParallel (%d * %d = %d), but should not be", expectedNumCtx, actualNumParallel, scaledNumCtx)
