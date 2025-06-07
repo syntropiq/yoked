@@ -149,24 +149,40 @@ w := createRequest(t, s.ChatHandler, req)  // Line 1132
 - NumCtx override logging in GenerateHandler
 - Scheduler loading progress logging
 
-### Recommended Next Steps
+### Recommended Next Steps (Revised June 7, 2025)
 
-1. **Architectural Decision Required**: Determine intended system behavior
-2. **Design Unification Assessment**: Evaluate shared vs. separate logic approaches
-3. **Implementation Strategy**: Choose between:
-   - Add dynamic calculation to ChatHandler
-   - Update tests to match current implementation
-   - Remove dynamic calculation entirely
-4. **Testing Strategy Revision**: Align tests with final design decision
+1.  **Architectural Decision: Unify `NumCtx` Handling for `ChatHandler`**:
+    *   **Decision:** Unify behavior; `ChatHandler` will also implement dynamic `NumCtx` calculation.
+    *   **Action:** Refactor dynamic `NumCtx` calculation logic from `GenerateHandler` into a reusable function in `server/routes.go` and integrate it into `ChatHandler`.
+    *   **Action:** Update `TestGenerateChat` expectations to match the new dynamic `NumCtx` behavior.
 
-### Current System State
+2.  **Refine Dynamic `NumCtx` Calculation Formula:**
+    *   **Proposed New Formula for `calculateDynamicNumCtx`:**
+        1.  Calculate `baseNumCtx = messageLength * 2`.
+        2.  Round `baseNumCtx` up to the nearest multiple of `1024` (serving as the `n_ctx_per_seq` barrier).
+        3.  Apply a floor: `calculatedNumCtx = max(roundedNumCtx, 4096)`.
+        4.  Apply a cap: `calculatedNumCtx = min(calculatedNumCtx, modelMaxCtx)`.
+        5.  Return `calculatedNumCtx`.
+    *   **Action:** Update `calculateDynamicNumCtx` in `server/routes.go` with this new formula.
+    *   **Action:** Re-evaluate `determineMaxResponseTokens` to ensure alignment.
 
-- **GenerateHandler**: ✅ Has dynamic NumCtx calculation
-- **ChatHandler**: ❌ No dynamic NumCtx calculation  
-- **Tests**: ❌ Expect ChatHandler to have dynamic calculation
-- **Documentation**: ❌ Behavior not clearly specified
+3.  **Address `TestRequestsSameModelSameRequest` Failures:**
+    *   **Action:** Add logging in `server/sched.go` to trace model queuing, processing, reuse, and reloading.
+    *   **Action:** Investigate the "incompatible model" error source in `llm/server.go` or related files.
+    *   **Action:** Implement and verify fixes for model loading/compatibility.
 
-This inconsistency represents a fundamental design decision point that requires architectural review before proceeding with fixes.
+### Current System State (Updated June 7, 2025)
+
+-   **GenerateHandler**: ✅ Has dynamic NumCtx calculation
+-   **ChatHandler**: ❌ No dynamic NumCtx calculation (Target for unification)
+-   **Tests**:
+    *   `TestDynamicNumCtxCalculation` ✅ FIXED
+    *   `TestDynamicNumCtxGenerateHandler` ✅ FIXED
+    *   `TestGenerateChat` ❌ FAILING (Target for unification and new formula)
+    *   `TestRequestsSameModelSameRequest` ❌ FAILING (Target for investigation)
+-   **Documentation**: ❌ Behavior not clearly specified (Will be updated as part of this plan)
+
+This revised plan addresses the critical design inconsistency and refines the dynamic `NumCtx` calculation for more predictable and efficient resource management.
 
 ---
 

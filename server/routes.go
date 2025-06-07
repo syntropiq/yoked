@@ -91,20 +91,28 @@ func modelOptions(model *Model, requestOpts map[string]any) (api.Options, error)
 func calculateDynamicNumCtx(messageLength int, maxResponseTokens int, modelMaxCtx int) int {
 	slog.Debug("calculateDynamicNumCtx", "messageLength", messageLength, "maxResponseTokens", maxResponseTokens, "modelMaxCtx", modelMaxCtx)
 
-	calculatedNumCtx := messageLength + maxResponseTokens
-	slog.Debug("calculateDynamicNumCtx: before rounding", "calculatedNumCtx", calculatedNumCtx)
+	// Step 1: Calculate baseNumCtx = messageLength * 2
+	baseNumCtx := messageLength * 2
+	slog.Debug("calculateDynamicNumCtx: baseNumCtx", "baseNumCtx", baseNumCtx)
 
-	// Round up to the nearest multiple of 1024
-	calculatedNumCtx = ((calculatedNumCtx + 1023) / 1024) * 1024
-	slog.Debug("calculateDynamicNumCtx: after rounding", "calculatedNumCtx", calculatedNumCtx)
+	// Step 2: Round up to the nearest multiple of 1024
+	roundedNumCtx := ((baseNumCtx + 1023) / 1024) * 1024
+	slog.Debug("calculateDynamicNumCtx: after rounding", "roundedNumCtx", roundedNumCtx)
 
-	// Cap at model's maximum context length
+	// Step 3: Apply floor of 4096
+	calculatedNumCtx := roundedNumCtx
+	if calculatedNumCtx < 4096 {
+		calculatedNumCtx = 4096
+		slog.Debug("calculateDynamicNumCtx: applied floor", "original", roundedNumCtx, "floor", calculatedNumCtx)
+	}
+
+	// Step 4: Apply cap at model's maximum context length
 	if calculatedNumCtx > modelMaxCtx {
 		slog.Debug("calculateDynamicNumCtx: capping to model max", "original", calculatedNumCtx, "capped", modelMaxCtx)
 		calculatedNumCtx = modelMaxCtx
 	}
 
-	slog.Debug("calculateDynamicNumCtx", "messageLength", messageLength, "maxResponseTokens", maxResponseTokens, "modelMaxCtx", modelMaxCtx, "calculated", calculatedNumCtx)
+	slog.Debug("calculateDynamicNumCtx", "messageLength", messageLength, "maxResponseTokens", maxResponseTokens, "modelMaxCtx", modelMaxCtx, "baseNumCtx", baseNumCtx, "roundedNumCtx", roundedNumCtx, "calculated", calculatedNumCtx)
 
 	return calculatedNumCtx
 }

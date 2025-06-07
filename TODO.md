@@ -28,19 +28,39 @@
 
 ### Remaining Debug Mode Subtasks for Regression Investigation
 
-- [ ] **Debug Subtask 1: `TestNumCtxNotScaledByNumParallel` Investigation**
-    - **Goal:** Determine why `TestNumCtxNotScaledByNumParallel` is failing.
-    - **Instructions:** Add extensive logging in `server/sched.go` to trace `NumCtx` and `numParallel` values. Run the test in isolation and report detailed log output.
-    - **Note:** If the failure is due to an expectation difference (e.g., test expects 1024 but implementation produces 8192), update the test. If it's returning 0, nil, or a "failed to work" mode, investigate and fix the implementation.
-- [ ] **Debug Subtask 3: `TestGenerateChat` Investigation**
-    - **Goal:** Understand why `TestGenerateChat` is failing.
-    - **Instructions:** Add logging in `server/routes.go` (`ChatHandler`) and `server/prompt.go` (`chatPrompt`) to trace prompt content, token counts, and truncation behavior. Run the test and report.
-    - **Note:** If the failure is due to an expectation difference, update the test. If it's returning 0, nil, or a "failed to work" mode, investigate and fix the implementation.
-- [ ] **Debug Subtask 4: `TestRequestsSameModelSameRequest` Investigation**
-    - **Goal:** Determine why `TestRequestsSameModelSameRequest` is failing.
-    - **Instructions:** Add logging in `server/sched.go` to trace concurrent request handling for the same model. Log `NumCtx` and `numParallel` values. Run the test and report unexpected behavior.
-    - **Note:** If the failure is due to an expectation difference, update the test. If it's returning 0, nil, or a "failed to work" mode, investigate and fix the implementation.
-- [ ] **Debug Subtask 5: `TestGenerate` Investigation**
-    - **Goal:** Understand why `TestGenerate` is failing.
-    - **Instructions:** Add logging in `server/routes.go` (`GenerateHandler`) and `llm/server.go` to trace request, prompt, tokenization, and `NumPredict` handling. Run the test and report.
-    - **Note:** If the failure is due to an expectation difference, update the test. If it's returning 0, nil, or a "failed to work" mode, investigate and fix the implementation.
+- [ ] **Phase 1: Address `TestGenerateChat` Failures (Critical Design Inconsistency)**
+    - [ ] **Subtask 1.1: Unify `NumCtx` Handling for `ChatHandler`**
+        - **Goal:** Implement dynamic `NumCtx` calculation in `ChatHandler`.
+        - **Mode:** Code
+        - **Instructions:** Refactor dynamic `NumCtx` calculation logic from `GenerateHandler` into a reusable function (`calculateAndSetDynamicNumCtx`) in [`server/routes.go`](server/routes.go). Integrate this reusable function into `ChatHandler` in [`server/routes.go`](server/routes.go).
+    - [ ] **Subtask 1.2: Refine Dynamic `NumCtx` Calculation Formula**
+        - **Goal:** Implement the new dynamic `NumCtx` formula in `calculateDynamicNumCtx`.
+        - **Mode:** Code
+        - **Instructions:** Modify `calculateDynamicNumCtx` in [`server/routes.go`](server/routes.go) to use: `calculatedNumCtx = max(4096, ((messageLength * 2 + 1023) / 1024) * 1024)`. Cap this at `modelMaxCtx`. Re-evaluate `determineMaxResponseTokens` for alignment.
+    - [ ] **Subtask 1.3: Update `TestGenerateChat` Expectations**
+        - **Goal:** Adjust `TestGenerateChat` to reflect the new dynamic `NumCtx` behavior.
+        - **Mode:** Code
+        - **Instructions:** Modify assertions in `TestGenerateChat` in [`server/routes_generate_test.go`](server/routes_generate_test.go) to expect values calculated by the new dynamic formula.
+- [ ] **Phase 2: Address `TestRequestsSameModelSameRequest` Failures**
+    - [ ] **Subtask 2.1: Investigate Model Loading in Scheduler**
+        - **Goal:** Pinpoint why model loading is failing or if there's a race condition/mismanagement of model instances.
+        - **Mode:** Debug
+        - **Instructions:** Add extensive logging within [`server/sched.go`](server/sched.go) to trace model queuing, processing, reuse, and reloading. Log model name/path and `NewLlamaServer` errors.
+    - [ ] **Subtask 2.2: Analyze "Incompatible Model" Error**
+        - **Goal:** Understand conditions triggering "incompatible model" error.
+        - **Mode:** Debug
+        - **Instructions:** Investigate source of error in [`llm/server.go`](llm/server.go) or related files. Analyze logs from Subtask 2.1.
+    - [ ] **Subtask 2.3: Implement Fix for Model Loading/Compatibility**
+        - **Goal:** Resolve underlying issue causing model loading failures.
+        - **Mode:** Code
+        - **Instructions:** Implement necessary code changes in `server/sched.go` or `llm/server.go`.
+- [ ] **Phase 3: Documentation Updates**
+    - [ ] **Subtask 3.1: Update `ISSUE.md`**
+        - **Goal:** Document problem diagnosis, root cause, and resolution for all fixed issues.
+        - **Mode:** Architect
+    - [ ] **Subtask 3.2: Update `PLAN.md`**
+        - **Goal:** Update status of resolved tests and refine the plan for remaining items.
+        - **Mode:** Architect
+    - [ ] **Subtask 3.3: Update `TODO.md`**
+        - **Goal:** Mark completed subtasks and update the list of remaining tasks.
+        - **Mode:** Architect
