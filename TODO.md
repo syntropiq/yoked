@@ -18,39 +18,20 @@
 - [x] **FIX TEST EXPECTATIONS**: Update test cases to match current PLAN.md requirements (numPredict: nil should use remaining context, not 1024 default).
 - [x] **FIX MOCK SERVER CAPTURE**: Investigate and fix mock server timing issue to properly capture dynamic NumCtx values from final scheduler calls.
 - [x] **INVESTIGATE AND FIX REGRESSIONS**: Initial analysis and plan for addressing new test failures.
+- [x] **✅ RESOLVED: API Field Deprecation Issue (June 7, 2025)**
+    - **Problem:** Automated tool changed `Name` to `Model` in CreateRequest structs, but server still uses deprecated `Name` field for validation
+    - **Root Cause:** `server/create.go` validates using `r.Name` while tests were using `r.Model`
+    - **Solution:** Reverted test CreateRequest instances back to using deprecated `Name` field
+    - **Tests Fixed:** `TestDynamicNumCtxCalculation` and `TestDynamicNumCtxGenerateHandler` now pass
+    - **Files Modified:** `server/routes_generate_test.go` (10 CreateRequest instances reverted)
+    - **Verification:** `go test -v -run TestDynamicNumCtx` passes successfully
 
-### Debug Mode Subtasks for Regression Investigation
-
-- [ ] **Debug Subtask 1: `TestNumCtxNotScaledByNumParallel` Investigation**
-    - **Goal:** Determine why `TestNumCtxNotScaledByNumParallel` is failing.
-    - **Instructions:** Add extensive logging in `server/sched.go` to trace `NumCtx` and `numParallel` values. Run the test in isolation and report detailed log output.
-    - **Note:** If the failure is due to an expectation difference (e.g., test expects 1024 but implementation produces 8192), update the test. If it's returning 0, nil, or a "failed to work" mode, investigate and fix the implementation.
-- [ ] **Debug Subtask 2: `TestDynamicNumCtxGenerateHandler` Investigation**
-    - **Goal:** Understand why subtests within `TestDynamicNumCtxGenerateHandler` are failing. This investigation should also provide insights into `TestDynamicNumCtxCalculation` failures.
-    - **Instructions:** Add logging in `server/routes.go` to trace `NumCtx` calculation. Enhance mock server in `server/routes_generate_test.go` to log received `api.Options`. Run tests and report discrepancies.
-    - **Note:** If the failure is due to an expectation difference, update the test. If it's returning 0, nil, or a "failed to work" mode, investigate and fix the implementation.
-- [ ] **Debug Subtask 3: `TestGenerateChat` Investigation**
-    - **Goal:** Understand why `TestGenerateChat` is failing.
-    - **Instructions:** Add logging in `server/routes.go` (`ChatHandler`) and `server/prompt.go` (`chatPrompt`) to trace prompt content, token counts, and truncation behavior. Run the test and report.
-    - **Note:** If the failure is due to an expectation difference, update the test. If it's returning 0, nil, or a "failed to work" mode, investigate and fix the implementation.
-- [ ] **Debug Subtask 4: `TestRequestsSameModelSameRequest` Investigation**
-    - **Goal:** Determine why `TestRequestsSameModelSameRequest` is failing.
-    - **Instructions:** Add logging in `server/sched.go` to trace concurrent request handling for the same model. Log `NumCtx` and `numParallel` values. Run the test and report unexpected behavior.
-    - **Note:** If the failure is due to an expectation difference, update the test. If it's returning 0, nil, or a "failed to work" mode, investigate and fix the implementation.
-- [ ] **Debug Subtask 5: `TestGenerate` Investigation**
-    - **Goal:** Understand why `TestGenerate` is failing.
-    - **Instructions:** Add logging in `server/routes.go` (`GenerateHandler`) and `llm/server.go` to trace request, prompt, tokenization, and `NumPredict` handling. Run the test and report.
-    - **Note:** If the failure is due to an expectation difference, update the test. If it's returning 0, nil, or a "failed to work" mode, investigate and fix the implementation.
-### Debug Mode Subtasks for Regression Investigation
+### Remaining Debug Mode Subtasks for Regression Investigation
 
 - [ ] **Debug Subtask 1: `TestNumCtxNotScaledByNumParallel` Investigation**
     - **Goal:** Determine why `TestNumCtxNotScaledByNumParallel` is failing.
     - **Instructions:** Add extensive logging in `server/sched.go` to trace `NumCtx` and `numParallel` values. Run the test in isolation and report detailed log output.
     - **Note:** If the failure is due to an expectation difference (e.g., test expects 1024 but implementation produces 8192), update the test. If it's returning 0, nil, or a "failed to work" mode, investigate and fix the implementation.
-- [ ] **Debug Subtask 2: `TestDynamicNumCtxGenerateHandler` Investigation**
-    - **Goal:** Understand why subtests within `TestDynamicNumCtxGenerateHandler` are failing. This investigation should also provide insights into `TestDynamicNumCtxCalculation` failures.
-    - **Instructions:** Add logging in `server/routes.go` to trace `NumCtx` calculation. Enhance mock server in `server/routes_generate_test.go` to log received `api.Options`. Run tests and report discrepancies.
-    - **Note:** If the failure is due to an expectation difference, update the test. If it's returning 0, nil, or a "failed to work" mode, investigate and fix the implementation.
 - [ ] **Debug Subtask 3: `TestGenerateChat` Investigation**
     - **Goal:** Understand why `TestGenerateChat` is failing.
     - **Instructions:** Add logging in `server/routes.go` (`ChatHandler`) and `server/prompt.go` (`chatPrompt`) to trace prompt content, token counts, and truncation behavior. Run the test and report.
