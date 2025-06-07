@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -54,9 +53,11 @@ func (mockRunner) Tokenize(_ context.Context, s string) (tokens []int, err error
 func newMockServer(mock *mockRunner) func(discover.GpuInfoList, string, *ggml.GGML, []string, []string, api.Options, int) (llm.LlamaServer, error) {
 	return func(_ discover.GpuInfoList, _ string, _ *ggml.GGML, _, _ []string, opts api.Options, numParallel int) (llm.LlamaServer, error) {
 		// Capture the options and numParallel for test assertions
-		fmt.Printf("DEBUG: Mock server called with NumCtx=%d, numParallel=%d\n", opts.Runner.NumCtx, numParallel)
-		mock.CapturedOptions = opts
-		mock.CapturedNumParallel = numParallel
+		// Only capture when NumCtx > 0 to avoid capturing from temp tokenization calls
+		if opts.Runner.NumCtx > 0 {
+			mock.CapturedOptions = opts
+			mock.CapturedNumParallel = numParallel
+		}
 		return mock, nil
 	}
 }
@@ -1023,10 +1024,17 @@ func TestDynamicNumCtxCalculation(t *testing.T) {
 			getGpuFn:      discover.GetGPUInfo,
 			getCpuFn:      discover.GetCPUInfo,
 			reschedDelay:  250 * time.Millisecond,
-			loadFn: func(req *LlmRequest, _ *ggml.GGML, _ discover.GpuInfoList, _ int) {
+			loadFn: func(req *LlmRequest, ggml *ggml.GGML, gpus discover.GpuInfoList, numParallel int) {
 				time.Sleep(time.Millisecond)
+				// Call newServerFn to properly capture options for testing
+				// The signature is: func(gpus, model, ggml, adapters, projectors, opts, numParallel)
+				server, err := newMockServer(&mock)(gpus, req.model.ModelPath, ggml, nil, nil, req.opts, numParallel)
+				if err != nil {
+					req.errCh <- err
+					return
+				}
 				req.successCh <- &runnerRef{
-					llama: &mock,
+					llama: server,
 				}
 			},
 		},
@@ -1073,10 +1081,10 @@ func TestDynamicNumCtxCalculation(t *testing.T) {
 		{
 			name:           "short prompt with default response",
 			prompt:         "Hello",
-			numPredict:     nil, // will use default 1024
+			numPredict:     nil, // will use remaining context (8192 - 1 = 8191)
 			providedNumCtx: nil,
-			expectedNumCtx: 2048, // (1 + 1024) rounded up to nearest 1024
-			description:    "1 token prompt + 1024 default response = 1025, rounded to 2048",
+			expectedNumCtx: 8192, // (1 + 8191) = 8192, capped at modelMaxCtx
+			description:    "1 token prompt + remaining context = 8192",
 		},
 		{
 			name:           "medium prompt with custom response",
@@ -1091,7 +1099,7 @@ func TestDynamicNumCtxCalculation(t *testing.T) {
 			prompt:         "Hello",
 			numPredict:     &[]int{100}[0],
 			providedNumCtx: &[]int{4096}[0], // Should be ignored
-			expectedNumCtx: 1024,            // (1 + 100) rounded up to nearest 1024
+			expectedNumCtx: 1024,            // (1 + 100) = 101, rounded up to nearest 1024
 			description:    "Provided NumCtx should be disregarded in favor of dynamic calculation",
 		},
 		{

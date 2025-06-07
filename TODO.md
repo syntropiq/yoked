@@ -15,3 +15,6 @@
 - [x] **CRITICAL DESIGN ISSUE**: Architectural review required for `NumCtx` dynamic calculation inconsistency between `GenerateHandler` and `ChatHandler` (see `ISSUE.md`).
 - [x] Implement dynamic `NumCtx` calculation in `ChatHandler` by refactoring existing logic into a reusable function in `server/routes.go`.
 - [x] Update `server/routes_generate_test.go` to include new test cases for `ChatHandler` and ensure existing tests pass with unified behavior.
+- [x] **FIX TEST EXPECTATIONS**: Update test cases to match current PLAN.md requirements (numPredict: nil should use remaining context, not 1024 default).
+- [x] **FIX MOCK SERVER CAPTURE**: Investigate and fix mock server timing issue to properly capture dynamic NumCtx values from final scheduler calls.
+- [ ] **INVESTIGATE AND FIX REGRESSIONS**: Address new test failures introduced by recent changes.

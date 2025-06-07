@@ -167,3 +167,33 @@ w := createRequest(t, s.ChatHandler, req)  // Line 1132
 - **Documentation**: ❌ Behavior not clearly specified
 
 This inconsistency represents a fundamental design decision point that requires architectural review before proceeding with fixes.
+
+---
+
+## RESOLUTION UPDATE (June 7, 2025)
+
+### Issue Status: PARTIALLY RESOLVED
+
+**RESOLVED**: The design inconsistency between `GenerateHandler` and `ChatHandler` has been resolved by implementing the unified `calculateAndSetDynamicNumCtx` function.
+
+**NEW ISSUE IDENTIFIED**: Test expectations are based on outdated requirements. Tests expect `numPredict: nil` to default to 1024 tokens, but the current implementation correctly follows PLAN.md where `nil` means use remaining context (`modelMaxCtx - messageLength`).
+
+### Updated System State
+
+- **GenerateHandler**: ✅ Has dynamic NumCtx calculation
+- **ChatHandler**: ✅ Has dynamic NumCtx calculation (via unified `calculateAndSetDynamicNumCtx`)
+- **Tests**: ❌ Expect outdated behavior (1024 default vs remaining context)
+- **Documentation**: ✅ Behavior specified in PLAN.md
+- **Mock Server**: ❌ Not capturing final scheduler calls properly
+
+### Test Expectation Corrections Needed
+
+1. **Update test cases** to expect remaining context calculation instead of fixed 1024 default
+2. **Fix mock server capture timing** to properly validate dynamic NumCtx values
+3. **Align all test expectations** with current PLAN.md specifications
+
+### Test Cases Requiring Updates
+
+- `"short prompt with default response"`: Expected 2048 → Should expect 8192 (remaining context)
+- `"NumPredict -1 uses model max"`: Already correct at 8192
+- Other cases need review for consistency with PLAN.md requirements
