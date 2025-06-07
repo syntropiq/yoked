@@ -223,9 +223,11 @@ func (s *Server) GenerateHandler(c *gin.Context) {
 	checkpointStart := time.Now()
 	var req api.GenerateRequest
 	if err := c.ShouldBindJSON(&req); errors.Is(err, io.EOF) {
+		slog.Error("GenerateHandler: missing request body")
 		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "missing request body"})
 		return
 	} else if err != nil {
+		slog.Error("GenerateHandler: JSON binding error", "error", err.Error())
 		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
@@ -234,6 +236,7 @@ func (s *Server) GenerateHandler(c *gin.Context) {
 	if !name.IsValid() {
 		// Ideally this is "invalid model name" but we're keeping with
 		// what the API currently returns until we can change it.
+		slog.Error("GenerateHandler: invalid model name", "model", req.Model)
 		c.JSON(http.StatusNotFound, gin.H{"error": fmt.Sprintf("model '%s' not found", req.Model)})
 		return
 	}
@@ -242,12 +245,14 @@ func (s *Server) GenerateHandler(c *gin.Context) {
 	// induce infinite recursion given the current code structure.
 	name, err := getExistingName(name)
 	if err != nil {
+		slog.Error("GenerateHandler: getExistingName failed", "model", req.Model, "error", err.Error())
 		c.JSON(http.StatusNotFound, gin.H{"error": fmt.Sprintf("model '%s' not found", req.Model)})
 		return
 	}
 
 	m, err := GetModel(name.String())
 	if err != nil {
+		slog.Error("GenerateHandler: GetModel failed", "model", req.Model, "name", name.String(), "error", err.Error())
 		switch {
 		case errors.Is(err, fs.ErrNotExist):
 			c.JSON(http.StatusNotFound, gin.H{"error": fmt.Sprintf("model '%s' not found", req.Model)})
@@ -1658,13 +1663,21 @@ func (s *Server) PsHandler(c *gin.Context) {
 }
 
 func (s *Server) ChatHandler(c *gin.Context) {
+	slog.Info("ChatHandler: Function called")
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("ChatHandler: Panic occurred", "panic", r)
+		}
+	}()
 	checkpointStart := time.Now()
 
 	var req api.ChatRequest
 	if err := c.ShouldBindJSON(&req); errors.Is(err, io.EOF) {
+		slog.Error("ChatHandler: missing request body")
 		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "missing request body"})
 		return
 	} else if err != nil {
+		slog.Error("ChatHandler: JSON binding error", "error", err.Error())
 		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
@@ -1705,11 +1718,13 @@ func (s *Server) ChatHandler(c *gin.Context) {
 
 	name := model.ParseName(req.Model)
 	if !name.IsValid() {
+		slog.Error("ChatHandler: invalid model name", "model", req.Model)
 		c.JSON(http.StatusBadRequest, gin.H{"error": "model is required"})
 		return
 	}
 	name, err := getExistingName(name)
 	if err != nil {
+		slog.Error("ChatHandler: getExistingName failed", "model", req.Model, "error", err.Error())
 		c.JSON(http.StatusBadRequest, gin.H{"error": "model is required"})
 		return
 	}

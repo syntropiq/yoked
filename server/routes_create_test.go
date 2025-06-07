@@ -85,10 +85,19 @@ func createRequest(t *testing.T, fn func(*gin.Context), body any) *httptest.Resp
 	}
 
 	c.Request = &http.Request{
+		Method: "POST",
+		Header: http.Header{
+			"Content-Type": []string{"application/json"},
+		},
 		Body: io.NopCloser(&b),
 	}
 
+	t.Logf("createRequest: about to call handler function with request method=%s, content-type=%s, body size=%d",
+		c.Request.Method, c.Request.Header.Get("Content-Type"), b.Len())
+
 	fn(c)
+
+	t.Logf("createRequest: handler returned with status=%d", w.Code)
 	return w.ResponseRecorder
 }
 
