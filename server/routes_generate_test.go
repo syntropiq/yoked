@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -53,19 +52,11 @@ func (mockRunner) Tokenize(_ context.Context, s string) (tokens []int, err error
 
 func newMockServer(mock *mockRunner) func(discover.GpuInfoList, string, *ggml.GGML, []string, []string, api.Options, int) (llm.LlamaServer, error) {
 	return func(_ discover.GpuInfoList, _ string, _ *ggml.GGML, _, _ []string, opts api.Options, numParallel int) (llm.LlamaServer, error) {
-		// Log all calls to mock server for debugging
-		fmt.Printf("DEBUG: newMockServer called with NumCtx=%d, NumPredict=%d, numParallel=%d\n",
-			opts.Runner.NumCtx, opts.NumPredict, numParallel)
-
 		// Capture the options and numParallel for test assertions
 		// Only capture when NumCtx > 0 to avoid capturing from temp tokenization calls
 		if opts.Runner.NumCtx > 0 {
-			fmt.Printf("DEBUG: Capturing options - NumCtx=%d, NumPredict=%d, numParallel=%d\n",
-				opts.Runner.NumCtx, opts.NumPredict, numParallel)
 			mock.CapturedOptions = opts
 			mock.CapturedNumParallel = numParallel
-		} else {
-			fmt.Printf("DEBUG: Not capturing options - NumCtx=%d <= 0\n", opts.Runner.NumCtx)
 		}
 		return mock, nil
 	}
