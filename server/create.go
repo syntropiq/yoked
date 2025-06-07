@@ -55,7 +55,7 @@ func (s *Server) CreateHandler(c *gin.Context) {
 		}
 	}
 
-	name := model.ParseName(r.Model)
+	name := model.ParseName(r.Name)
 	if !name.IsValid() {
 		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": errtypes.InvalidModelNameErrMsg})
 		return

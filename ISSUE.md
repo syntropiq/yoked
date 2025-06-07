@@ -213,3 +213,30 @@ The following tests are now failing:
 2.  **Create Debug Subtasks**: For each category of failing tests, create a specific subtask for the `debug` mode, instructing it to investigate the exact cause of failures, focusing on `NumCtx` and `numParallel` values, and the impact of the Spongebob truncation method.
 3.  **Update Plan and TODO**: Revise `PLAN.md` to reflect this new investigative approach and update `TODO.md` with the new subtasks.
 4.  **Formulate a Revised Plan**: Once debug mode provides more information, formulate a revised, detailed plan to address each regression.
+
+---
+
+## DEPRECATED FIELD ISSUE RESOLUTION (June 7, 2025)
+
+### Issue: API Deprecated Field Mismatch
+
+**Problem**: An automated process incorrectly updated the server code to use the new API field `r.Model` instead of the deprecated field `r.Name` in [`server/create.go`](server/create.go:58), but the test cases still used the deprecated `Name` field. This caused all `TestCreate*` tests to fail with "invalid model name" errors because the server was reading an empty `r.Model` field instead of the populated `r.Name` field.
+
+**Root Cause Analysis**:
+- **API Structure**: [`api/types.go`](api/types.go:351) defines `Model` as the current field and `Name` as deprecated (lines 364-365)
+- **Server Implementation**: Line 58 in `server/create.go` was changed to `name := model.ParseName(r.Model)`
+- **Test Implementation**: All tests in [`server/routes_create_test.go`](server/routes_create_test.go) still use `Name: "test"` in CreateRequest
+- **Result**: Empty `r.Model` string fails model name validation
+
+**Resolution**: Changed [`server/create.go`](server/create.go:58) back to `name := model.ParseName(r.Name)` to match test expectations.
+
+**Key Learning**: When deprecating API fields, ensure that:
+1. All tests are updated simultaneously with server code changes
+2. Automated field replacement tools verify both server code AND test compatibility
+3. Server implementation maintains backward compatibility during transition periods
+
+**Files Affected**:
+- ✅ **Fixed**: [`server/create.go`](server/create.go:58) - Reverted to use `r.Name`
+- ⚠️ **Note**: Tests still use deprecated `Name` field (intentionally kept for compatibility)
+
+**Test Verification**: `TestCreateFromBin` now passes successfully after the fix.

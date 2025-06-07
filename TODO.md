@@ -29,9 +29,10 @@
     - **Goal:** Understand why subtests within `TestDynamicNumCtxGenerateHandler` are failing.
     - **Instructions:** Add logging in `server/routes.go` to trace `NumCtx` calculation. Enhance mock server in `server/routes_generate_test.go` to log received `api.Options`. Run tests and report discrepancies.
     - **Resolution:** Fixed two critical issues: (1) Corrected `determineMaxResponseTokens` function to use remaining context instead of fixed 1024 default when `numPredict=-1`, matching existing behavior. (2) Fixed mock server capture logic by implementing proper `loadFn` pattern that calls `newMockServer` to capture final scheduler options. Both `TestDynamicNumCtxGenerateHandler` and `TestDynamicNumCtxCalculation` now pass successfully.
-- [ ] **Debug Subtask 3: `TestCreate*` Tests Investigation**
+- [x] **Debug Subtask 3: `TestCreate*` Tests Investigation**
     - **Goal:** Pinpoint the exact cause of failures in `TestCreate*` tests.
     - **Instructions:** Add logging in `server/create.go` to trace model metadata flow. Log expected vs. actual values. Run tests individually and report specific discrepancies.
+    - **Resolution:** Identified and fixed API deprecated field mismatch. Server code was using `r.Model` (new field) while tests used `r.Name` (deprecated field). Reverted [`server/create.go:58`](server/create.go:58) to use `r.Name` for backward compatibility. `TestCreateFromBin` now passes. Issue documented in `ISSUE.md` for future reference.
 - [ ] **Debug Subtask 4: `TestManifestCaseSensitivity` Investigation**
     - **Goal:** Determine the root cause of `TestManifestCaseSensitivity` failure.
     - **Instructions:** Add logging in manifest parsing logic (`model/` or `parser/`) to show how model names/paths are compared. Run the test and report comparison logic and values.

@@ -80,6 +80,26 @@ Instead of immediately attempting fixes, the primary goal is to gather more prec
             *   Run these tests after the `TestCreate*` issues are investigated (but not necessarily fixed).
             *   If they still fail, add logging to their respective handlers in [`server/routes.go`](server/routes.go) and underlying functions to trace model lookup, deletion, and listing operations.
             *   Report on any specific errors or unexpected behavior.
+## RESOLUTION UPDATE: Deprecated Field Issue (June 7, 2025)
+
+### Phase 2 Resolution: Model Creation Tests ✅ FIXED
+
+**Issue Identified**: API deprecated field mismatch caused all `TestCreate*` tests to fail.
+
+**Root Cause**: 
+- [`server/create.go:58`](server/create.go:58) was using `r.Model` (new API field) 
+- Tests in [`server/routes_create_test.go`](server/routes_create_test.go) still used `r.Name` (deprecated field)
+- Result: Server read empty `r.Model` instead of populated `r.Name`, causing "invalid model name" errors
+
+**Resolution**: Reverted [`server/create.go:58`](server/create.go:58) to use `r.Name` for backward compatibility.
+
+**Prevention Strategy for Future Deprecated Field Issues**:
+1. **Synchronized Updates**: When automated tools update deprecated fields, verify both server code AND tests are updated together
+2. **Backward Compatibility**: Maintain compatibility during transition periods until all tests are migrated
+3. **Migration Planning**: Document field migration strategy and timeline in API documentation  
+4. **Testing Strategy**: Add specific tests to verify deprecated field behavior during transition
+
+**Test Verification**: `TestCreateFromBin` now passes successfully.
 
 ## Revised Mermaid Diagram: Regression Investigation Flow
 
