@@ -53,8 +53,10 @@ An example of a `Modelfile` creating a mario blueprint:
 FROM llama3.2
 # sets the temperature to 1 [higher is more creative, lower is more coherent]
 PARAMETER temperature 1
-# sets the context window size to 4096, this controls how many tokens the LLM can use as context to generate the next token
-PARAMETER num_ctx 4096
+# The `num_ctx` parameter is now deprecated and its value is effectively ignored.
+# The context window size is now dynamically calculated based on the message length,
+# rounded up to the nearest 1024, with a minimum of 4096, and capped by the model's maximum context length.
+# PARAMETER num_ctx 4096
 
 # sets a custom system message to specify the behavior of the chat assistant
 SYSTEM You are Mario from super mario bros, acting as an assistant.
@@ -150,7 +152,7 @@ PARAMETER <parameter> <parametervalue>
 
 | Parameter      | Description                                                                                                                                                                                                                                             | Value Type | Example Usage        |
 | -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------- | -------------------- |
-| num_ctx        | Sets the size of the context window used to generate the next token. (Default: 2048)                                                                                                                                                                    | int        | num_ctx 4096         |
+| num_ctx        | **DEPRECATED:** This parameter is now effectively ignored. The context window size is dynamically calculated based on the message length, rounded up to the nearest 1024, with a minimum of 4096, and capped by the model's maximum context length. | int        | num_ctx 4096         |
 | repeat_last_n  | Sets how far back for the model to look back to prevent repetition. (Default: 64, 0 = disabled, -1 = num_ctx)                                                                                                                                           | int        | repeat_last_n 64     |
 | repeat_penalty | Sets how strongly to penalize repetitions. A higher value (e.g., 1.5) will penalize repetitions more strongly, while a lower value (e.g., 0.9) will be more lenient. (Default: 1.1)                                                                     | float      | repeat_penalty 1.1   |
 | temperature    | The temperature of the model. Increasing the temperature will make the model answer more creatively. (Default: 0.8)                                                                                                                                     | float      | temperature 0.7      |

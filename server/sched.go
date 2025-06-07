@@ -635,6 +635,7 @@ func (runner *runnerRef) needsReload(ctx context.Context, req *LlmRequest) bool 
 
 	// Normalize the NumCtx for parallelism
 	optsExisting.NumCtx = optsExisting.NumCtx / runner.numParallel
+	optsNew.NumCtx = optsNew.NumCtx / runner.numParallel
 
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()

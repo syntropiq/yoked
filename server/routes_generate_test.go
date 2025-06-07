@@ -1083,23 +1083,23 @@ func TestDynamicNumCtxCalculation(t *testing.T) {
 			prompt:         "Hello",
 			numPredict:     nil, // will use remaining context (8192 - 1 = 8191)
 			providedNumCtx: nil,
-			expectedNumCtx: 8192, // (1 + 8191) = 8192, capped at modelMaxCtx
-			description:    "1 token prompt + remaining context = 8192",
+			expectedNumCtx: 4096, // messageLength=1, baseNumCtx=1*2=2, rounded=1024, floor=4096
+			description:    "1 token prompt with new formula: baseNumCtx=2, rounded=1024, floor=4096",
 		},
 		{
 			name:           "medium prompt with custom response",
 			prompt:         "This is a medium length prompt that should be tokenized to multiple words",
 			numPredict:     &[]int{512}[0],
 			providedNumCtx: nil,
-			expectedNumCtx: 1024, // (11 + 512) rounded up to nearest 1024
-			description:    "11 token prompt + 512 response = 523, rounded to 1024",
+			expectedNumCtx: 4096, // messageLength=11, baseNumCtx=11*2=22, rounded=1024, floor=4096
+			description:    "11 token prompt with new formula: baseNumCtx=22, rounded=1024, floor=4096",
 		},
 		{
 			name:           "provided NumCtx should be ignored",
 			prompt:         "Hello",
 			numPredict:     &[]int{100}[0],
 			providedNumCtx: &[]int{4096}[0], // Should be ignored
-			expectedNumCtx: 1024,            // (1 + 100) = 101, rounded up to nearest 1024
+			expectedNumCtx: 4096,            // messageLength=1, baseNumCtx=1*2=2, rounded=1024, floor=4096
 			description:    "Provided NumCtx should be disregarded in favor of dynamic calculation",
 		},
 		{
@@ -1107,8 +1107,8 @@ func TestDynamicNumCtxCalculation(t *testing.T) {
 			prompt:         "Hi",
 			numPredict:     &[]int{-1}[0],
 			providedNumCtx: nil,
-			expectedNumCtx: int(modelContextLength), // Should use full model context
-			description:    "NumPredict -1 should use full model context length",
+			expectedNumCtx: 4096, // messageLength=1, baseNumCtx=1*2=2, rounded=1024, floor=4096
+			description:    "NumPredict -1 with new formula: baseNumCtx=2, rounded=1024, floor=4096",
 		},
 	}
 
@@ -1240,23 +1240,23 @@ func TestDynamicNumCtxGenerateHandler(t *testing.T) {
 			prompt:         "Hello",
 			numPredict:     nil, // will use remaining context
 			providedNumCtx: nil,
-			expectedNumCtx: 4096, // (1 + 4095) = 4096, capped at modelMaxCtx
-			description:    "1 token prompt + remaining context (4095) = 4096",
+			expectedNumCtx: 4096, // messageLength=1, baseNumCtx=1*2=2, rounded=1024, floor=4096
+			description:    "1 token prompt with new formula: baseNumCtx=2, rounded=1024, floor=4096",
 		},
 		{
 			name:           "generate medium prompt with custom response",
 			prompt:         "This is a medium length prompt",
 			numPredict:     &[]int{256}[0],
 			providedNumCtx: nil,
-			expectedNumCtx: 1024, // (6 + 256) rounded up to nearest 1024
-			description:    "6 token prompt + 256 response = 262, rounded to 1024",
+			expectedNumCtx: 4096, // messageLength=6, baseNumCtx=6*2=12, rounded=1024, floor=4096
+			description:    "6 token prompt with new formula: baseNumCtx=12, rounded=1024, floor=4096",
 		},
 		{
 			name:           "generate provided NumCtx should be ignored",
 			prompt:         "Test",
 			numPredict:     &[]int{100}[0],
 			providedNumCtx: &[]int{2048}[0], // Should be ignored
-			expectedNumCtx: 1024,            // (1 + 100) rounded up to nearest 1024
+			expectedNumCtx: 4096,            // messageLength=1, baseNumCtx=1*2=2, rounded=1024, floor=4096
 			description:    "Provided NumCtx should be disregarded in favor of dynamic calculation",
 		},
 	}
@@ -1391,8 +1391,8 @@ func TestNumCtxNotScaledByNumParallel(t *testing.T) {
 			return
 		}
 
-		// Expected: 2 tokens (message) + 4094 (remaining context) = 4096 (model max context)
-		// Dynamic calculation: messageLength=2, modelMaxCtx=4096, remainingContext=4094, so NumCtx=4096
+		// Expected with new formula: messageLength=2, baseNumCtx=2*2=4, rounded=1024, floor=4096
+		// Dynamic calculation: messageLength=2, baseNumCtx=4, rounded=1024, floor=4096, final=4096
 		expectedNumCtx := 4096
 		actualNumCtx := mock.CapturedOptions.Runner.NumCtx
 		actualNumParallel := mock.CapturedNumParallel

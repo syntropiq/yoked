@@ -20,31 +20,11 @@ Please refer to the [GPU docs](./gpu.md).
 
 ## How can I specify the context window size?
 
-By default, Ollama uses a context window size of 4096 tokens. 
+The `num_ctx` parameter and `OLLAMA_CONTEXT_LENGTH` environment variable are now deprecated and their values are effectively ignored.
 
-This can be overridden with the `OLLAMA_CONTEXT_LENGTH` environment variable. For example, to set the default context window to 8K, use: 
+The context window size is now dynamically calculated based on the message length, rounded up to the nearest 1024, with a minimum of 4096, and capped by the model's maximum context length. This ensures optimal GPU utilization and prevents unbounded memory growth.
 
-```shell
-OLLAMA_CONTEXT_LENGTH=8192 ollama serve
-```
-
-To change this when using `ollama run`, use `/set parameter`:
-
-```shell
-/set parameter num_ctx 4096
-```
-
-When using the API, specify the `num_ctx` parameter:
-
-```shell
-curl http://localhost:11434/api/generate -d '{
-  "model": "llama3.2",
-  "prompt": "Why is the sky blue?",
-  "options": {
-    "num_ctx": 4096
-  }
-}'
-```
+For example, if your message is 1000 tokens, the context window will be calculated as `max(4096, ((1000 * 2 + 1023) / 1024) * 1024)`, which rounds up to 4096. If your message is 3000 tokens, it would be `max(4096, ((3000 * 2 + 1023) / 1024) * 1024)`, which rounds up to 6144. The final value will always be capped by the model's inherent maximum context length.
 
 ## How can I tell if my model was loaded onto the GPU?
 

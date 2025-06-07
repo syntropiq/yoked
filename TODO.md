@@ -28,39 +28,63 @@
 
 ### Remaining Debug Mode Subtasks for Regression Investigation
 
-- [ ] **Phase 1: Address `TestGenerateChat` Failures (Critical Design Inconsistency)**
-    - [ ] **Subtask 1.1: Unify `NumCtx` Handling for `ChatHandler`**
+- [ ] **New Performance Diagnosis Plan: "Time to First Token" Degradation (June 7, 2025)**
+    - [ ] **Subtask 3.1: Client-side "Time to First Token" Stopwatch**
+        - **Goal:** Measure and display "time to first token" in client's `--verbose` output.
+        - **Mode:** Code
+        - **Instructions:** Identify relevant client-side verbose output location (e.g., `cmd` or `app` directories). Implement a stopwatch that starts when the request is sent and stops when the first token is received. Display this duration in the `--verbose` output.
+    - [ ] **Subtask 3.2: Server-side Context Size and Truncation Logging**
+        - **Goal:** Log `num_ctx` per message and truncation warnings in server logs.
+        - **Mode:** Code
+        - **Instructions:** Enhance `calculateAndSetDynamicNumCtx` in [`server/routes.go`](server/routes.go) to log `dynamicNumCtx` after calculation, including request ID and model name. Identify prompt truncation logic (likely `server/prompt.go`). Add log entries *before* truncation (original message length, `NumCtx` limit) and *after* truncation (final truncated length, amount lopped off).
+    - [ ] **Subtask 3.3: Verification of New Logging**
+        - **Goal:** Confirm new logging is accurate and provides expected diagnostic information.
+        - **Mode:** Debug
+        - **Instructions:** Run a user acceptance test scenario that reproduces "time to first token" degradation and involves context growth/truncation. Review client-side `--verbose` output and server logs.
+    - [ ] **Subtask 3.4: Update Documentation (Final)**
+        - **Goal:** Document the findings and resolution of the "time to first token" issue.
+        - **Mode:** Architect
+        - **Instructions:** Update `ISSUE.md` with the diagnosis and resolution. Update `PLAN.md` with the completed subtasks. Update `TODO.md` to mark these new tasks as completed.
+
+- [x] **Phase 1: Address `TestGenerateChat` Failures (Critical Design Inconsistency)**
+    - [x] **Subtask 1.1: Unify `NumCtx` Handling for `ChatHandler`**
         - **Goal:** Implement dynamic `NumCtx` calculation in `ChatHandler`.
         - **Mode:** Code
+        - **Status:** ✅ COMPLETED - `ChatHandler` already had dynamic NumCtx calculation implemented via `calculateAndSetDynamicNumCtx` function
         - **Instructions:** Refactor dynamic `NumCtx` calculation logic from `GenerateHandler` into a reusable function (`calculateAndSetDynamicNumCtx`) in [`server/routes.go`](server/routes.go). Integrate this reusable function into `ChatHandler` in [`server/routes.go`](server/routes.go).
-    - [ ] **Subtask 1.2: Refine Dynamic `NumCtx` Calculation Formula**
+    - [x] **Subtask 1.2: Refine Dynamic `NumCtx` Calculation Formula**
         - **Goal:** Implement the new dynamic `NumCtx` formula in `calculateDynamicNumCtx`.
         - **Mode:** Code
+        - **Status:** ✅ COMPLETED - Updated `calculateDynamicNumCtx` function with new formula: `baseNumCtx = messageLength * 2`, round to 1024, apply floor of 4096, cap at modelMaxCtx
         - **Instructions:** Modify `calculateDynamicNumCtx` in [`server/routes.go`](server/routes.go) to use: `calculatedNumCtx = max(4096, ((messageLength * 2 + 1023) / 1024) * 1024)`. Cap this at `modelMaxCtx`. Re-evaluate `determineMaxResponseTokens` for alignment.
-    - [ ] **Subtask 1.3: Update `TestGenerateChat` Expectations**
+    - [x] **Subtask 1.3: Update `TestGenerateChat` Expectations**
         - **Goal:** Adjust `TestGenerateChat` to reflect the new dynamic `NumCtx` behavior.
         - **Mode:** Code
+        - **Status:** ✅ COMPLETED - Updated test expectations in `TestDynamicNumCtxCalculation`, `TestDynamicNumCtxGenerateHandler`, and `TestNumCtxNotScaledByNumParallel` to reflect new formula calculations
         - **Instructions:** Modify assertions in `TestGenerateChat` in [`server/routes_generate_test.go`](server/routes_generate_test.go) to expect values calculated by the new dynamic formula.
-- [ ] **Phase 2: Address `TestRequestsSameModelSameRequest` Failures**
-    - [ ] **Subtask 2.1: Investigate Model Loading in Scheduler**
+- [x] **Phase 2: Address `TestRequestsSameModelSameRequest` Failures**
+    - [x] **Subtask 2.1: Investigate Model Loading in Scheduler**
         - **Goal:** Pinpoint why model loading is failing or if there's a race condition/mismanagement of model instances.
         - **Mode:** Debug
+        - **Status:** ✅ COMPLETED - Added extensive logging to `needsReload` function and identified root cause: NumCtx normalization inconsistency
         - **Instructions:** Add extensive logging within [`server/sched.go`](server/sched.go) to trace model queuing, processing, reuse, and reloading. Log model name/path and `NewLlamaServer` errors.
-    - [ ] **Subtask 2.2: Analyze "Incompatible Model" Error**
+    - [x] **Subtask 2.2: Analyze "Incompatible Model" Error**
         - **Goal:** Understand conditions triggering "incompatible model" error.
         - **Mode:** Debug
+        - **Status:** ✅ COMPLETED - Determined that the "incompatible model" error was not the issue; the problem was in `needsReload` function logic
         - **Instructions:** Investigate source of error in [`llm/server.go`](llm/server.go) or related files. Analyze logs from Subtask 2.1.
-    - [ ] **Subtask 2.3: Implement Fix for Model Loading/Compatibility**
+    - [x] **Subtask 2.3: Implement Fix for Model Loading/Compatibility**
         - **Goal:** Resolve underlying issue causing model loading failures.
         - **Mode:** Code
+        - **Status:** ✅ COMPLETED - Fixed NumCtx normalization bug in `needsReload` function by normalizing both `optsExisting.NumCtx` and `optsNew.NumCtx` by `runner.numParallel`
         - **Instructions:** Implement necessary code changes in `server/sched.go` or `llm/server.go`.
-- [ ] **Phase 3: Documentation Updates**
-    - [ ] **Subtask 3.1: Update `ISSUE.md`**
+- [x] **Phase 3: Documentation Updates**
+    - [x] **Subtask 3.1: Update `ISSUE.md`**
         - **Goal:** Document problem diagnosis, root cause, and resolution for all fixed issues.
         - **Mode:** Architect
-    - [ ] **Subtask 3.2: Update `PLAN.md`**
+    - [x] **Subtask 3.2: Update `PLAN.md`**
         - **Goal:** Update status of resolved tests and refine the plan for remaining items.
         - **Mode:** Architect
-    - [ ] **Subtask 3.3: Update `TODO.md`**
-        - **Goal:** Mark completed subtasks and update the list of remaining tasks.
-        - **Mode:** Architect
+    - [x] **Subtask 3.3: Update `TODO.md`**
+            - **Goal:** Mark completed subtasks and update the list of remaining tasks.
+            - **Mode:** Architect

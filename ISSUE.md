@@ -12,6 +12,28 @@ The current Ollama implementation for managing model context size (`NumCtx`) exh
 
 The goal is to transition to a dynamic `NumCtx` sizing approach that optimizes resource usage by calculating `NumCtx` based on the actual incoming message length plus the expected response length, capped at the model's true maximum context.
 
+---
+
+## New Performance Observation: "Time to First Token" Degradation (June 7, 2025)
+
+During user acceptance testing, a significant degradation in "time to first token" has been observed, worsening with each subsequent pass (especially when spitting out ~4k more tokens each time). This occurs despite RAM usage remaining relatively stable, leading to uncertainty about whether context truncation is occurring.
+
+**Symptoms:**
+- Increasing latency for the first token on successive requests.
+- Stable RAM usage, suggesting context might not be growing as expected or is being truncated.
+- Lack of detailed server-side logging regarding per-message context size and truncation events.
+
+**Hypothesized Causes (to be investigated):**
+1.  **Model Reloads/Re-initialization:** Despite previous fixes for `needsReload`, the `llama.cpp` model might still be undergoing unexpected reloads or re-initializations within the Go process, leading to startup overhead on each pass.
+2.  **Internal `llama.cpp` State Management:** Even if the model remains loaded, `llama.cpp` itself might have internal state management or caching mechanisms that are not performing optimally with growing context, leading to increased processing time for the first token.
+3.  **Silent Truncation:** The context might be silently truncated without explicit server-side logging, leading to unexpected behavior and performance characteristics.
+
+**Relationship with `llama.cpp`:**
+Ollama uses `llama.cpp` as a C/C++ library directly linked into the Go application via `cgo`. This means performance issues are likely due to:
+- Overhead of loading/re-initializing the model within `llama.cpp`.
+- Initial prompt evaluation within `llama.cpp`.
+- Go-side processing before/after `llama.cpp` calls.
+
 ## Proposed Solution Overview
 
 The proposed solution involves intercepting and recalculating `NumCtx` at the API request handling layer (`server/routes.go`) before it reaches the scheduler and backend. This calculated `NumCtx` will be based on the sum of the incoming message's token length and the `max_response_tokens` (or a sensible default), rounded up to the nearest multiple of 1024, and strictly capped by the model's maximum context length. The scheduler's current `NumCtx * numParallel` scaling will be removed, as the new `NumCtx` will already represent the desired effective context for a single request.
@@ -225,14 +247,37 @@ ok  	github.com/ollama/ollama/server	0.555s
 
 **Note:** This highlights the need for better coordination between API field deprecation and server implementation updates. The server should ideally handle both `Model` and `Name` fields during the transition period.
 
-### Remaining Investigation Items
+### Remaining Investigation Items (Updated June 7, 2025)
 
 The following tests may still need investigation if they continue to fail:
 
-- `TestGenerateChat`
 - `TestGenerate`
 - `TestNumCtxNotScaledByNumParallel`
-- `TestRequestsSameModelSameRequest`
 
 **Important Note on Test vs. Implementation Discrepancies:**
 If a test failure is due to an expectation difference (e.g., the test expects 1024 but the implementation correctly produces 8192), the test should be updated to reflect the correct implementation behavior. If, however, the implementation is returning 0, nil, or some other "failed to work" mode, then the underlying implementation needs to be investigated and fixed. This distinction is crucial for efficient debugging and resolution.
+
+---
+
+## ✅ RESOLVED: `TestRequestsSameModelSameRequest` Failures (June 7, 2025)
+
+**Root Cause Identified and Fixed:**
+- **Problem**: `NumCtx` normalization inconsistency in the `needsReload` function at line ~637 in `server/sched.go`.
+- **Technical Issue**: The function normalized `optsExisting.NumCtx` by dividing by `runner.numParallel` but left `optsNew.NumCtx` unchanged, causing `reflect.DeepEqual` comparison to fail and trigger unnecessary model reloads.
+- **Evidence**: Logs showed `optsExisting.NumCtx=2048` vs `optsNew.NumCtx=4096` after normalization.
+
+**Fix Implemented:**
+- **Location**: `server/sched.go`, `needsReload` function (line ~650).
+- **Change**: Added `optsNew.NumCtx = optsNew.NumCtx / runner.numParallel` to normalize both options equally.
+- **Result**: Both `NumCtx` values now properly normalized (e.g., 2048 vs 2048), allowing runner reuse.
+
+**Verification Results:**
+- ✅ `TestRequestsSameModelSameRequest` now passes consistently.
+- ✅ `TestRequestsSimpleReloadSameModel` continues to pass (no regression).
+- ✅ `TestNeedsReload` continues to pass (no regression).
+- ✅ Test execution time improved from timeout (500ms) to immediate success (<1ms).
+
+**Files Modified:**
+- `server/sched.go`: Fixed `NumCtx` normalization bug in `needsReload` function.
+
+**Key Insight:** This fix ensures that when multiple requests come in for the same model with identical configurations, the scheduler correctly reuses the existing model runner instead of unnecessarily triggering a reload, which was causing the test timeout failures.

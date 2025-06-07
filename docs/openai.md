@@ -344,25 +344,6 @@ curl http://localhost:11434/v1/chat/completions \
 
 ### Setting the context size
 
-The OpenAI API does not have a way of setting the context size for a model. If you need to change the context size, create a `Modelfile` which looks like:
+The `num_ctx` parameter is now deprecated and its value is effectively ignored. The context window size is dynamically calculated based on the message length, rounded up to the nearest 1024, with a minimum of 4096, and capped by the model's maximum context length. This ensures optimal GPU utilization and prevents unbounded memory growth.
 
-```
-FROM <some model>
-PARAMETER num_ctx <context size>
-```
-
-Use the `ollama create mymodel` command to create a new model with the updated context size. Call the API with the updated model name:
-
-```shell
-curl http://localhost:11434/v1/chat/completions \
-    -H "Content-Type: application/json" \
-    -d '{
-        "model": "mymodel",
-        "messages": [
-            {
-                "role": "user",
-                "content": "Hello!"
-            }
-        ]
-    }'
-```
+For example, if your message is 1000 tokens, the context window will be calculated as `max(4096, ((1000 * 2 + 1023) / 1024) * 1024)`, which rounds up to 4096. If your message is 3000 tokens, it would be `max(4096, ((3000 * 2 + 1023) / 1024) * 1024)`, which rounds up to 6144. The final value will always be capped by the model's inherent maximum context length.
