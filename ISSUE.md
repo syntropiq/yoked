@@ -170,73 +170,20 @@ This inconsistency represents a fundamental design decision point that requires 
 
 ---
 
-## RESOLUTION UPDATE (June 7, 2025)
+## Current Test Failures (June 7, 2025)
 
-### Issue Status: REGRESSIONS INTRODUCED
+The following tests are currently failing, indicating regressions that need investigation:
 
-**PREVIOUSLY RESOLVED**: The design inconsistency between `GenerateHandler` and `ChatHandler` was resolved by implementing the unified `calculateAndSetDynamicNumCtx` function. The `TestDynamicNumCtxCalculation` test expectations were updated, and the mock server capture issue was fixed, leading to its successful passing.
-
-**NEW REGRESSIONS IDENTIFIED**: Recent changes have introduced new test failures across various test suites. These regressions need to be investigated and resolved to ensure overall system stability.
-
-### Current System State
-
-- **Dynamic NumCtx Calculation**: ✅ Implemented and verified for `GenerateHandler` and `ChatHandler`.
-- **`TestDynamicNumCtxCalculation`**: ✅ Passing.
-- **Overall Test Suite**: ❌ Multiple failures detected.
-
-### Regressions to Investigate
-
-The following tests are now failing:
-
-- `TestCreateFromBin`
-- `TestCreateFromModel`
-- `TestCreateRemovesLayers`
-- `TestCreateUnsetsSystem`
-- `TestCreateMergeParameters`
-- `TestCreateReplacesMessages`
-- `TestCreateTemplateSystem`
-- `TestCreateLicenses`
-- `TestCreateDetectTemplate` (including subtests)
-- `TestDelete`
-- `TestGenerateChat` (including subtests)
-- `TestDynamicNumCtxGenerateHandler` (including subtests)
-- `TestNumCtxNotScaledByNumParallel` (including subtests)
-- `TestList`
-- `TestRoutes` (including subtests)
-- `TestManifestCaseSensitivity`
-- `TestShow`
+- `TestGenerateChat`
+- `TestGenerate`
+- `TestDynamicNumCtxCalculation`
+- `TestDynamicNumCtxGenerateHandler`
+- `TestNumCtxNotScaledByNumParallel`
 - `TestRequestsSameModelSameRequest`
 
-### Next Steps
+### Investigation Approach
 
-1.  **Deeper Investigation via Debug Mode**: Based on initial analysis and user feedback, the widespread regressions suggest a fundamental issue, potentially a "simple and stupid" oversight related to how `numParallel` or `NumCtx` values are passed and interpreted. A deeper investigation is required.
-2.  **Create Debug Subtasks**: For each category of failing tests, create a specific subtask for the `debug` mode, instructing it to investigate the exact cause of failures, focusing on `NumCtx` and `numParallel` values, and the impact of the Spongebob truncation method.
-3.  **Update Plan and TODO**: Revise `PLAN.md` to reflect this new investigative approach and update `TODO.md` with the new subtasks.
-4.  **Formulate a Revised Plan**: Once debug mode provides more information, formulate a revised, detailed plan to address each regression.
+A deeper investigation via `debug` mode is required to pinpoint the exact cause of these failures. The investigation will focus on `NumCtx` and `numParallel` values, and the impact of the Spongebob truncation method.
 
----
-
-## DEPRECATED FIELD ISSUE RESOLUTION (June 7, 2025)
-
-### Issue: API Deprecated Field Mismatch
-
-**Problem**: An automated process incorrectly updated the server code to use the new API field `r.Model` instead of the deprecated field `r.Name` in [`server/create.go`](server/create.go:58), but the test cases still used the deprecated `Name` field. This caused all `TestCreate*` tests to fail with "invalid model name" errors because the server was reading an empty `r.Model` field instead of the populated `r.Name` field.
-
-**Root Cause Analysis**:
-- **API Structure**: [`api/types.go`](api/types.go:351) defines `Model` as the current field and `Name` as deprecated (lines 364-365)
-- **Server Implementation**: Line 58 in `server/create.go` was changed to `name := model.ParseName(r.Model)`
-- **Test Implementation**: All tests in [`server/routes_create_test.go`](server/routes_create_test.go) still use `Name: "test"` in CreateRequest
-- **Result**: Empty `r.Model` string fails model name validation
-
-**Resolution**: Changed [`server/create.go`](server/create.go:58) back to `name := model.ParseName(r.Name)` to match test expectations.
-
-**Key Learning**: When deprecating API fields, ensure that:
-1. All tests are updated simultaneously with server code changes
-2. Automated field replacement tools verify both server code AND test compatibility
-3. Server implementation maintains backward compatibility during transition periods
-
-**Files Affected**:
-- ✅ **Fixed**: [`server/create.go`](server/create.go:58) - Reverted to use `r.Name`
-- ⚠️ **Note**: Tests still use deprecated `Name` field (intentionally kept for compatibility)
-
-**Test Verification**: `TestCreateFromBin` now passes successfully after the fix.
+**Important Note on Test vs. Implementation Discrepancies:**
+If a test failure is due to an expectation difference (e.g., the test expects 1024 but the implementation correctly produces 8192), the test should be updated to reflect the correct implementation behavior. If, however, the implementation is returning 0, nil, or some other "failed to work" mode, then the underlying implementation needs to be investigated and fixed. This distinction is crucial for efficient debugging and resolution.
