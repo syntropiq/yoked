@@ -99,6 +99,8 @@ func calculateDynamicNumCtx(messageLength int, maxResponseTokens int, modelMaxCt
 		calculatedNumCtx = modelMaxCtx
 	}
 	
+	slog.Debug("calculateDynamicNumCtx", "messageLength", messageLength, "maxResponseTokens", maxResponseTokens, "modelMaxCtx", modelMaxCtx, "calculated", calculatedNumCtx)
+	
 	return calculatedNumCtx
 }
 
@@ -309,6 +311,17 @@ func (s *Server) GenerateHandler(c *gin.Context) {
 
 	// Calculate dynamic NumCtx
 	dynamicNumCtx := calculateDynamicNumCtx(messageLength, maxResponseTokens, modelMaxCtx)
+
+	// Log original NumCtx for debugging
+	originalNumCtx := 0
+	if req.Options != nil {
+		if val, ok := req.Options["num_ctx"]; ok {
+			if numCtx, ok := val.(int); ok {
+				originalNumCtx = numCtx
+			}
+		}
+	}
+	slog.Debug("NumCtx override in generate", "original", originalNumCtx, "dynamic", dynamicNumCtx, "model", req.Model)
 
 	// Override the NumCtx in request options
 	if req.Options == nil {

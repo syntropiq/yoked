@@ -69,6 +69,54 @@ graph TD
     M -- (Spongebob Truncation uses finalNumCtx) --> R[server/prompt.go: chatPrompt()]
 ```
 
+## CRITICAL DESIGN INCONSISTENCY RESOLUTION PLAN
+
+**Goal:** Unify `NumCtx` calculation across `GenerateHandler` and `ChatHandler` in `server/routes.go` and update relevant tests.
+
+**Detailed Plan:**
+
+1.  **Refactor Dynamic `NumCtx` Calculation into a Reusable Function:**
+    *   Extract the `NumCtx` calculation logic from `GenerateHandler` into a new, private helper function (e.g., `calculateAndSetDynamicNumCtx`) within [`server/routes.go`](server/routes.go). This function will take the necessary parameters (e.g., `modelMaxCtx`, `prompt`, `req.Options`, `s.scheduleRunner` related parameters for tokenization) and return the updated `api.Options` or directly modify `req.Options`.
+    *   This promotes code reuse and reduces duplication.
+
+2.  **Integrate Reusable Function into `ChatHandler`:**
+    *   Call the newly created helper function within `ChatHandler` in [`server/routes.go`](server/routes.go) to perform the dynamic `NumCtx` calculation before calling `s.scheduleRunner`.
+    *   Ensure that `ChatHandler` correctly handles message tokenization for chat messages (which might involve iterating through `req.Messages` and applying the chat template if `req.Raw` is false).
+
+3.  **Update `server/routes_generate_test.go`:**
+    *   Review and modify existing tests that call `ChatHandler` but expect `GenerateHandler` behavior. These tests should now pass as `ChatHandler` will have the dynamic `NumCtx` calculation.
+    *   Add new test cases specifically for `ChatHandler` to verify its dynamic `NumCtx` calculation, including scenarios with varying message lengths, `NumPredict` values, rounding, and capping.
+    *   Ensure the mock server captures the `api.Options` passed to it for assertion in `ChatHandler` tests.
+
+**Mermaid Diagram: Unified Dynamic `NumCtx` Flow**
+
+```mermaid
+graph TD
+    A[Incoming API Request] --> B{server/routes.go}
+    B -- /api/generate --> C[GenerateHandler]
+    B -- /api/chat --> D[ChatHandler]
+
+    C --> E[Call calculateAndSetDynamicNumCtx()]
+    D --> E
+
+    E -- Get modelMaxCtx from GGUF --> F[kvData.ContextLength()]
+    E -- Determine messageLength (tokenize prompt/input/messages) --> G[messageLength]
+    E -- Determine maxResponseTokens (req.Options.NumPredict or default 1024) --> H[maxResponseTokens]
+    I{Calculate calculatedNumCtx = messageLength + maxResponseTokens} --> J[Round up to nearest 1024]
+    J --> K[Cap at modelMaxCtx: finalNumCtx = min(calculatedNumCtx, modelMaxCtx)]
+    K --> L[Override req.Options.Runner.NumCtx = finalNumCtx]
+
+    L --> M[s.scheduleRunner()]
+    M -- Passes opts (with finalNumCtx) --> N[server/sched.go: GetRunner()]
+    N -- Stores origNumCtx (now finalNumCtx) --> O[LlmRequest]
+    O --> P[server/sched.go: processPending()]
+    P -- REMOVE NumCtx * numParallel scaling --> Q[Pass finalNumCtx to llm.NewLlamaServer]
+    Q -- Passes numParallel separately --> R[llm.NewLlamaServer (Backend)]
+    R -- Passes --ctx-size (finalNumCtx) --> S[GGML Backend]
+    S -- Uses finalNumCtx for KV Cache, Graph Size, RoPE --> T[Model Execution]
+    P -- (Spongebob Truncation uses finalNumCtx) --> U[server/prompt.go: chatPrompt()]
+```
+
 ## Test Plan
 
 **Objective:** Identify all test files affected by the dynamic `NumCtx` sizing changes in `server/routes.go` and `server/sched.go`, analyze changed expectations, and formulate a plan for updating these tests.

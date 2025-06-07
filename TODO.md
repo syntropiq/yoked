@@ -9,5 +9,9 @@
 - [x] Formulate a plan for updating tests.
 - [x] Implement the test updates.
 - [x] Investigate `NumPredict = -1` behavior and its effect on context calculation.
-- [ ] Investigate and resolve `NumCtx` scaling and preservation failures in `sched_test.go`.
-- [ ] Fix `NumCtx` scaling in `server/sched.go` (`pickBestFullFitByLibrary` and `pickBestPartialFitByLibrary`).
+- [x] Investigate and resolve `NumCtx` scaling and preservation failures in `sched_test.go`.
+- [x] Fix `NumCtx` scaling in `server/sched.go` (`pickBestFullFitByLibrary` and `pickBestPartialFitByLibrary`).
+- [x] Investigate test failures and identify root cause of `NumCtx` calculation inconsistencies.
+- [x] **CRITICAL DESIGN ISSUE**: Architectural review required for `NumCtx` dynamic calculation inconsistency between `GenerateHandler` and `ChatHandler` (see `ISSUE.md`).
+- [ ] Implement dynamic `NumCtx` calculation in `ChatHandler` by refactoring existing logic into a reusable function in `server/routes.go`.
+- [ ] Update `server/routes_generate_test.go` to include new test cases for `ChatHandler` and ensure existing tests pass with unified behavior.

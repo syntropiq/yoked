@@ -484,6 +484,7 @@ func (s *Scheduler) load(req *LlmRequest, f *ggml.GGML, gpus discover.GpuInfoLis
 
 	go func() {
 		defer runner.refMu.Unlock()
+		slog.Debug("starting llama wait", "model", req.model.ModelPath, "runner", runner)
 		if err = llama.WaitUntilRunning(req.ctx); err != nil {
 			slog.Error("error loading llama server", "error", err)
 			req.errCh <- err
@@ -499,9 +500,10 @@ func (s *Scheduler) load(req *LlmRequest, f *ggml.GGML, gpus discover.GpuInfoLis
 		runner.loading = false
 		go func() {
 			<-req.ctx.Done()
-			slog.Debug("context for request finished")
+			slog.Debug("context for request finished", "model", req.model.ModelPath)
 			s.finishedReqCh <- req
 		}()
+		slog.Debug("sending success response", "model", req.model.ModelPath, "runner", runner)
 		req.successCh <- runner
 	}()
 }
@@ -780,7 +782,6 @@ func pickBestFullFitByLibrary(req *LlmRequest, f *ggml.GGML, gpus discover.GpuIn
 
 		// First attempt to fit the model into a single GPU
 		for _, p := range numParallelToTry {
-			req.opts.NumCtx = req.origNumCtx * p
 			if !envconfig.SchedSpread() {
 				for _, g := range sgl {
 					if ok, estimatedVRAM = llm.PredictServerFit([]discover.GpuInfo{g}, f, req.model.AdapterPaths, req.model.ProjectorPaths, req.opts, p); ok {
@@ -798,7 +799,6 @@ func pickBestFullFitByLibrary(req *LlmRequest, f *ggml.GGML, gpus discover.GpuIn
 
 		// Now try all the GPUs
 		for _, p := range numParallelToTry {
-			req.opts.NumCtx = req.origNumCtx * p
 			if ok, estimatedVRAM = llm.PredictServerFit(sgl, f, req.model.AdapterPaths, req.model.ProjectorPaths, req.opts, p); ok {
 				slog.Info("new model will fit in available VRAM, loading", "model", req.model.ModelPath, "library", sgl[0].Library, "parallel", p, "required", format.HumanBytes2(estimatedVRAM))
 				*numParallel = p

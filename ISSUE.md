@@ -32,3 +32,138 @@ The implementation of dynamic `NumCtx` sizing necessitates a review and update o
 4.  **`api/client_test.go` and `api/types_test.go`**: No changes are expected, as these files do not directly interact with `NumCtx` or `NumPredict` in a way that would be affected by the dynamic sizing.
 
 A separate investigation into the exact behavior and implications of `NumPredict = -1` will be conducted before the final implementation of the dynamic `NumCtx` feature.
+
+---
+
+# CRITICAL DESIGN INCONSISTENCY DISCOVERED
+
+## Debug Investigation Results
+
+During investigation of test failures (June 7, 2025), I discovered a **critical design inconsistency** that fundamentally undermines the dynamic NumCtx implementation:
+
+### Root Cause: Handler Implementation Divergence
+
+**The dynamic NumCtx calculation is ONLY implemented in `GenerateHandler` but NOT in `ChatHandler`**, creating inconsistent behavior across API endpoints that serve similar functions.
+
+### Detailed Technical Analysis
+
+#### 1. GenerateHandler Implementation (Lines 227-333 in server/routes.go)
+```go
+// Get model's maximum context length from GGUF metadata
+kvData, _, err := getModelData(m.ModelPath, false)
+modelMaxCtx := int(kvData.ContextLength())
+
+// Temporarily schedule runner to get initial options and runner for tokenization
+tempR, tempM, tempOpts, err := s.scheduleRunner(...)
+
+// Calculate message length by tokenizing the prompt
+tokens, err := tempR.Tokenize(c.Request.Context(), prompt)
+messageLength = len(tokens)
+
+// Determine max response tokens
+maxResponseTokens := determineMaxResponseTokens(tempOpts.NumPredict, messageLength, modelMaxCtx)
+
+// Calculate dynamic NumCtx
+dynamicNumCtx := calculateDynamicNumCtx(messageLength, maxResponseTokens, modelMaxCtx)
+req.Options["num_ctx"] = dynamicNumCtx
+
+// Now schedule the runner again with the updated NumCtx
+r, m, opts, err := s.scheduleRunner(c.Request.Context(), name.String(), caps, req.Options, req.KeepAlive)
+```
+
+#### 2. ChatHandler Implementation (Lines 1599+ in server/routes.go)
+```go
+// ChatHandler does NOT have any dynamic NumCtx calculation
+// It directly calls scheduleRunner without tokenization or dynamic sizing:
+r, m, opts, err := s.scheduleRunner(ctx, name.String(), caps, req.Options, req.KeepAlive)
+```
+
+### Test Failure Analysis
+
+#### Failing Test: `TestDynamicNumCtxCalculation`
+- **Expected**: Dynamic NumCtx calculation for ChatHandler
+- **Actual**: ChatHandler bypasses all dynamic calculation
+- **Result**: `mock.CapturedOptions.Runner.NumCtx = 0` (default/unmodified value)
+
+#### Evidence from Test Output:
+```
+routes_generate_test.go:1140: expected NumCtx 2048, got 0
+routes_generate_test.go:1145: expected numParallel > 0, got 0
+```
+
+#### Test Code Analysis:
+```go
+// Test calls ChatHandler but expects GenerateHandler behavior
+w := createRequest(t, s.ChatHandler, req)  // Line 1132
+// But ChatHandler doesn't have dynamic calculation!
+```
+
+### Diagnostic Logging Revealed:
+- No dynamic calculation logs appear in test output
+- Scheduler loads models with default NumCtx values
+- Mock server captures unmodified options structure
+
+### Impact Assessment
+
+#### 1. User Experience Impact
+- **Inconsistent Behavior**: `/api/generate` vs `/api/chat` endpoints behave differently
+- **Resource Utilization**: ChatHandler uses static NumCtx, potentially wasting memory
+- **Performance**: No dynamic optimization for chat interactions
+
+#### 2. Development Impact
+- **Test Failures**: Multiple test suites failing due to incorrect assumptions
+- **Code Maintenance**: Duplicated logic makes future changes error-prone
+- **Documentation Gap**: API behavior not clearly documented
+
+#### 3. System Architecture Impact
+- **Design Fragmentation**: Two similar endpoints with different NumCtx behavior
+- **Logic Duplication**: Multiple code paths for similar functionality
+- **Potential for Drift**: Future changes may only apply to one endpoint
+
+### Questions for Architectural Review
+
+#### 1. Design Intent Questions
+- **Was this intentional?** Should ChatHandler have different NumCtx behavior?
+- **Is there a technical reason** for the divergence between endpoints?
+- **What was the original design intent** for NumCtx behavior across endpoints?
+
+#### 2. Implementation Strategy Questions
+- **Should behavior be unified?** Both endpoints serve LLM interaction purposes
+- **Shared vs. Duplicated Logic?** Code reuse vs. endpoint-specific behavior
+- **Backward Compatibility?** How to handle existing user expectations
+
+#### 3. Testing Strategy Questions
+- **How should tests be structured** for both endpoints?
+- **What behavior should be tested** - unified or divergent?
+- **Should there be separate test suites** for each endpoint?
+
+### Evidence Files for Reference
+
+#### Key Implementation Files:
+- `server/routes.go` (GenerateHandler vs ChatHandler comparison)
+- `server/routes_generate_test.go` (failing test cases)
+- `api/types.go` (Options structure and conversion)
+
+#### Added Diagnostic Logging:
+- `calculateDynamicNumCtx()` function logging parameters and results
+- NumCtx override logging in GenerateHandler
+- Scheduler loading progress logging
+
+### Recommended Next Steps
+
+1. **Architectural Decision Required**: Determine intended system behavior
+2. **Design Unification Assessment**: Evaluate shared vs. separate logic approaches
+3. **Implementation Strategy**: Choose between:
+   - Add dynamic calculation to ChatHandler
+   - Update tests to match current implementation
+   - Remove dynamic calculation entirely
+4. **Testing Strategy Revision**: Align tests with final design decision
+
+### Current System State
+
+- **GenerateHandler**: ✅ Has dynamic NumCtx calculation
+- **ChatHandler**: ❌ No dynamic NumCtx calculation  
+- **Tests**: ❌ Expect ChatHandler to have dynamic calculation
+- **Documentation**: ❌ Behavior not clearly specified
+
+This inconsistency represents a fundamental design decision point that requires architectural review before proceeding with fixes.
