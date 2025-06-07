@@ -1,72 +1,34 @@
-# Ollama Context Enhancement - Phase 1: Improved Truncation Strategy
+# Issue: Dynamic Context Sizing (NumCtx)
 
-## 1. Problem Description
+## Problem Description
 
-The current context truncation mechanism in Ollama's `server/prompt.go :: chatPrompt` function, while preserving system messages and the latest user/assistant interaction, truncates the oldest messages in the conversation history to fit within the model's context window (`opts.NumCtx`). This can lead to the loss of the crucial initial user message (`M1`), which often sets the stage, defines the core problem, or provides essential grounding context for the entire subsequent conversation. Losing `M1` can degrade the quality and relevance of model responses in long conversations.
+The current Ollama implementation for managing model context size (`NumCtx`) exhibits several behaviors that can lead to inefficient resource utilization and unexpected performance characteristics:
 
-## 2. Solutions Considered
+1.  **Static Default:** `NumCtx` is initially set from an environment variable (`OLLAMA_CONTEXT_LENGTH`) or a fixed default, which may not be optimal for all model interactions.
+2.  **Request Overrides:** While `NumCtx` can be overridden in API requests, its interaction with internal scaling mechanisms is unclear.
+3.  **Scheduler Scaling:** The `server/sched.go` component scales `NumCtx` by `numParallel`, which can lead to excessive memory pre-allocation, even for short prompts, as observed by the user ("ram usage grows incredibly fast... even if the only thing I've said is hello"). This suggests that `NumCtx` is being interpreted as a total KV cache size for parallel operations rather than a per-request context window.
+4.  **Hard Capping:** For embedding requests, `NumCtx` is explicitly capped at the GGUF model's `context_length`, which might not always represent the true maximum context the model can handle if `context_length` is a recommended value rather than an absolute limit.
+5.  **Unclear `NumPredict` Impact:** The default behavior of `NumPredict = -1` currently means "use up to 10 times the current `NumCtx` for prediction" (`llm/server.go:770`). This can lead to very large potential response lengths when `NumCtx` is large, but the current plan's fixed default of 1024 for `maxResponseTokens` when `NumPredict` is -1 would override this, potentially limiting desired long responses.
 
-Several approaches to context truncation were evaluated:
+The goal is to transition to a dynamic `NumCtx` sizing approach that optimizes resource usage by calculating `NumCtx` based on the actual incoming message length plus the expected response length, capped at the model's true maximum context.
 
-1.  **Simple Head Token Truncation:** Removing the first N tokens from the fully rendered prompt.
-    *   *Rejected because:* It's not message-aware, can truncate system prompts critical for model behavior, and often cuts messages mid-sentence, destroying coherence.
-2.  **Middle-Out Token Truncation:** Removing N tokens from the center of the fully rendered prompt.
-    *   *Rejected because:* While potentially preserving the absolute start and end of the token stream, it still operates at the token level, leading to message fragmentation and loss of coherence in the removed section.
-3.  **Current Ollama `chatPrompt` Strategy:** Preserves all system messages and the latest message, then iteratively adds the most recent contiguous block of preceding messages until the context window is full.
-    *   *Partially suitable because:* It's message-aware and preserves recent context well. However, it consistently drops the oldest messages, including potentially vital initial user prompts (`M1`).
-4.  **Message-Level Middle-Out (Keep S, M1, Mlast, N oldest from remainder, M newest from remainder):** After preserving system messages, `M1`, and `M_latest`, select a few of the oldest and a few of the newest messages from the remaining history, removing the block in between.
-    *   *Considered but deferred because:* While it preserves `M1`, creating a "gap" in the middle of the conversation history might be jarring or less effective than preserving a contiguous block of recent history alongside `M1`.
-5.  **"Spongebob" Truncation Strategy (Selected for Phase 1):**
-    *   Always preserve all System Messages (`S_all`).
-    *   Always preserve the first User Message (`M1`).
-    *   Always preserve the latest message (`M_latest`).
-    *   If the conversation history between `M1` and `M_latest` needs to be truncated to fit the context window:
-        *   Insert a static placeholder message (`M_skip`) after `M1` (e.g., `"[Several conversation turns removed to conserve context.]"` with `role: system`). This `M_skip` acts as a marker for elided turns. If an `M_skip` was inserted in a previous turn and is still present after `M1`, it's reused.
-        *   Fill the remaining context budget by adding the most recent messages from the original history that occurred *between* `M1` (or `M_skip`) and `M_latest`.
+## Proposed Solution Overview
 
-## 3. Reason for Selection
+The proposed solution involves intercepting and recalculating `NumCtx` at the API request handling layer (`server/routes.go`) before it reaches the scheduler and backend. This calculated `NumCtx` will be based on the sum of the incoming message's token length and the `max_response_tokens` (or a sensible default), rounded up to the nearest multiple of 1024, and strictly capped by the model's maximum context length. The scheduler's current `NumCtx * numParallel` scaling will be removed, as the new `NumCtx` will already represent the desired effective context for a single request.
 
-The "Spongebob" strategy was selected for Phase 1 because it offers a balanced approach:
-*   **Preserves Critical Context:** It ensures that all system instructions, the vital initial user message (`M1`), and the latest user/assistant interaction (`M_latest`) are always included.
-*   **Handles Long Histories Gracefully:** The `M_skip` message acknowledges that part of the conversation has been elided for brevity, rather than silently dropping it. The idea of `M_skip` remaining in place if previously inserted prevents proliferation of skip markers.
-*   **Maintains Recent Relevance:** By filling remaining space with the most recent messages preceding `M_latest` (but after `M1`/`M_skip`), it keeps the immediate conversational flow leading up to the latest interaction.
-*   **Builds Incrementally:** It's an enhancement to the existing message-aware truncation logic rather than a complete rewrite or a problematic token-level approach.
+This approach aims to:
+*   Prevent excessive memory pre-allocation by sizing the context dynamically.
+*   Ensure efficient use of the model's context window.
+*   Provide a clear and predictable mechanism for context management.
+*   Disregard any `num_ctx` provided in the incoming request, as the system will now determine the optimal size.
 
-This strategy directly addresses the primary concern of losing `M1` while attempting to maintain as much relevant recent context as possible.
+## Test Plan Overview
 
-## 4. Implementation Status and Next Steps
+The implementation of dynamic `NumCtx` sizing necessitates a review and update of existing test cases to ensure correctness and prevent regressions. The primary focus will be on:
 
-### Code Implementation ✅
-The "Spongebob" truncation strategy has been successfully implemented in `server/prompt.go`. The implementation includes:
+1.  **`server/routes_generate_test.go`**: Adding new test cases to verify the dynamic `NumCtx` calculation, including scenarios with varying prompt lengths, `NumPredict` values (especially `-1`), rounding to 1024, and capping at `modelMaxCtx`. The mock server will be enhanced to capture the `api.Options` passed to it for assertion.
+2.  **`server/sched_test.go`**: Modifying existing tests or adding new ones to confirm that the `NumCtx` passed to `llm.NewLlamaServer` is no longer scaled by `numParallel`. The `mockLlm` will be updated to capture these parameters for verification.
+3.  **`server/prompt_test.go`**: No direct changes are expected, as this file tests the truncation logic based on a given `NumCtx`, which will now be dynamically provided from upstream.
+4.  **`api/client_test.go` and `api/types_test.go`**: No changes are expected, as these files do not directly interact with `NumCtx` or `NumPredict` in a way that would be affected by the dynamic sizing.
 
-- **M1 Preservation Logic**: Identifies and preserves the first user message.
-- **M_skip Management**: Inserts or reuses existing skip messages.
-- **Message Equality Function**: Added `messagesEqual()` to handle struct comparison with image data.
-- **Compilation Success**: All build errors resolved.
-
-### Test Failures Analysis and Resolution Path 🔍
-
-The implementation builds successfully but initially failed several existing tests in `server/prompt_test.go`. Analysis of the failures revealed a **test expectation mismatch**:
-
-#### Key Test Failures (Examples):
-
-1. **"truncate messages" test (limit: 1, expecting only latest message)**:
-   - **Old Expected**: `"A test. And a thumping good one at that, I'd wager. "`
-   - **Actual Got (Spongebob)**: `"You're a test, Harry! [Several conversation turns removed to conserve context.] A test. And a thumping good one at that, I'd wager. "`
-   - **Reason**: Test expected old behavior (only latest message), new Spongebob algorithm correctly preserves M1 + M_skip + latest.
-
-2. **"out of order system" test**:
-   - **Old Expected**: `"You're a test, Harry! I-I'm a what? You are the Test Who Lived. A test. And a thumping good one at that, I'd wager. "`
-   - **Actual Got (Spongebob)**: `"You are the Test Who Lived. You're a test, Harry! I-I'm a what? A test. And a thumping good one at that, I'd wager. "`
-   - **Reason**: New algorithm correctly moves all system messages to the front; old behavior preserved original interleaved order.
-
-#### Root Cause Assessment:
-The existing tests were validating the OLD truncation behavior, not the new "Spongebob" strategy.
-
-#### Tokenization Context:
-The mock tokenizer splits text on whitespace (each word = 1 token), so a `limit: 1` should allow roughly 1 word, making truncation very aggressive in tests.
-
-### Decision and Path Forward:
-**Decision**: The output behavior of the implemented "Spongebob" strategy (preserving M1, M_skip, M_latest, and grouping system messages at the start) is confirmed as the **desired and correct behavior**.
-
-**Next Step**: Update the failing unit tests in `server/prompt_test.go` to align their assertions with the expected output of the Spongebob strategy.
+A separate investigation into the exact behavior and implications of `NumPredict = -1` will be conducted before the final implementation of the dynamic `NumCtx` feature.

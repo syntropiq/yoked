@@ -209,7 +209,6 @@ func (s *Scheduler) processPending(ctx context.Context) {
 							numParallel = defaultParallel
 						}
 
-						pending.opts.NumCtx = pending.origNumCtx * numParallel
 
 						if loadedCount == 0 {
 							slog.Debug("cpu mode with first model, loading")

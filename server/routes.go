@@ -87,6 +87,36 @@ func modelOptions(model *Model, requestOpts map[string]any) (api.Options, error)
 	return opts, nil
 }
 
+// calculateDynamicNumCtx calculates the dynamic context size based on message length and response tokens
+func calculateDynamicNumCtx(messageLength int, maxResponseTokens int, modelMaxCtx int) int {
+	calculatedNumCtx := messageLength + maxResponseTokens
+	
+	// Round up to the nearest multiple of 1024
+	calculatedNumCtx = ((calculatedNumCtx + 1023) / 1024) * 1024
+	
+	// Cap at model's maximum context length
+	if calculatedNumCtx > modelMaxCtx {
+		calculatedNumCtx = modelMaxCtx
+	}
+	
+	return calculatedNumCtx
+}
+
+// determineMaxResponseTokens calculates the maximum response tokens based on NumPredict and available context
+func determineMaxResponseTokens(numPredict int, messageLength int, modelMaxCtx int) int {
+	if numPredict > 0 {
+		return numPredict
+	}
+	
+	// If NumPredict is -1 or not set, calculate based on remaining context
+	remainingContext := modelMaxCtx - messageLength
+	if remainingContext < 1024 {
+		return 1024
+	}
+	
+	return remainingContext
+}
+
 // scheduleRunner schedules a runner after validating inputs such as capabilities and model options.
 // It returns the allocated runner, model instance, and consolidated options if successful and error otherwise.
 func (s *Server) scheduleRunner(ctx context.Context, name string, caps []model.Capability, requestOpts map[string]any, keepAlive *api.Duration) (llm.LlamaServer, *Model, *api.Options, error) {
@@ -194,6 +224,99 @@ func (s *Server) GenerateHandler(c *gin.Context) {
 		// updated template supporting thinking
 	}
 
+	// Calculate dynamic NumCtx before scheduling the runner
+	// Get model's maximum context length from GGUF metadata
+	kvData, _, err := getModelData(m.ModelPath, false)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	modelMaxCtx := int(kvData.ContextLength())
+
+	// Temporarily schedule runner to get initial options and runner for tokenization
+	tempR, tempM, tempOpts, err := s.scheduleRunner(c.Request.Context(), name.String(), caps, req.Options, req.KeepAlive)
+	if err != nil {
+		handleScheduleError(c, req.Model, err)
+		return
+	}
+
+	// Calculate message length by tokenizing the prompt
+	var messageLength int
+	if req.Prompt != "" {
+		// For generate requests, we need to prepare the full prompt including template processing
+		prompt := req.Prompt
+		if !req.Raw {
+			tmpl := tempM.Template
+			if req.Template != "" {
+				tmpl, err = template.Parse(req.Template)
+				if err != nil {
+					c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+					return
+				}
+			}
+
+			var values template.Values
+			if req.Suffix != "" {
+				values.Prompt = prompt
+				values.Suffix = req.Suffix
+			} else {
+				var msgs []api.Message
+				if req.System != "" {
+					msgs = append(msgs, api.Message{Role: "system", Content: req.System})
+				} else if tempM.System != "" {
+					msgs = append(msgs, api.Message{Role: "system", Content: tempM.System})
+				}
+
+				if req.Context == nil {
+					msgs = append(msgs, tempM.Messages...)
+				}
+
+				values.Messages = append(msgs, api.Message{Role: "user", Content: req.Prompt})
+			}
+
+			values.Think = req.Think != nil && *req.Think
+			values.IsThinkSet = req.Think != nil
+
+			var b bytes.Buffer
+			if req.Context != nil {
+				s, err := tempR.Detokenize(c.Request.Context(), req.Context)
+				if err != nil {
+					c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+					return
+				}
+				b.WriteString(s)
+			}
+
+			if err := tmpl.Execute(&b, values); err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+				return
+			}
+
+			prompt = b.String()
+		}
+
+		// Tokenize the final prompt to get message length
+		tokens, err := tempR.Tokenize(c.Request.Context(), prompt)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		messageLength = len(tokens)
+	}
+
+	// Determine max response tokens
+	maxResponseTokens := determineMaxResponseTokens(tempOpts.NumPredict, messageLength, modelMaxCtx)
+
+	// Calculate dynamic NumCtx
+	dynamicNumCtx := calculateDynamicNumCtx(messageLength, maxResponseTokens, modelMaxCtx)
+
+	// Override the NumCtx in request options
+	if req.Options == nil {
+		req.Options = make(map[string]any)
+	}
+	req.Options["num_ctx"] = dynamicNumCtx
+
+	// Now schedule the runner again with the updated NumCtx
 	r, m, opts, err := s.scheduleRunner(c.Request.Context(), name.String(), caps, req.Options, req.KeepAlive)
 	if errors.Is(err, errCapabilityCompletion) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("%q does not support generate", req.Model)})
@@ -428,16 +551,10 @@ func (s *Server) EmbedHandler(c *gin.Context) {
 		return
 	}
 
-	r, m, opts, err := s.scheduleRunner(c.Request.Context(), name.String(), []model.Capability{}, req.Options, req.KeepAlive)
+	// Get model data to determine maximum context length
+	m, err := GetModel(name.String())
 	if err != nil {
-		handleScheduleError(c, req.Model, err)
-		return
-	}
-
-	checkpointLoaded := time.Now()
-
-	if len(input) == 0 {
-		c.JSON(http.StatusOK, api.EmbedResponse{Model: req.Model, Embeddings: [][]float32{}})
+		c.JSON(http.StatusNotFound, gin.H{"error": fmt.Sprintf("model '%s' not found", req.Model)})
 		return
 	}
 
@@ -446,14 +563,57 @@ func (s *Server) EmbedHandler(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
+	modelMaxCtx := int(kvData.ContextLength())
 
-	var count int
-	for i, s := range input {
-		tokens, err := r.Tokenize(c.Request.Context(), s)
+	if len(input) == 0 {
+		c.JSON(http.StatusOK, api.EmbedResponse{Model: req.Model, Embeddings: [][]float32{}})
+		return
+	}
+
+	// Calculate dynamic NumCtx for embedding based on the longest input
+	// First, we need a temporary runner to tokenize inputs
+	tempR, _, _, err := s.scheduleRunner(c.Request.Context(), name.String(), []model.Capability{}, req.Options, req.KeepAlive)
+	if err != nil {
+		handleScheduleError(c, req.Model, err)
+		return
+	}
+
+	maxInputLength := 0
+	var tokenizedInputs [][]int
+	for _, s := range input {
+		tokens, err := tempR.Tokenize(c.Request.Context(), s)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
+		tokenizedInputs = append(tokenizedInputs, tokens)
+		if len(tokens) > maxInputLength {
+			maxInputLength = len(tokens)
+		}
+	}
+
+	// For embeddings, we don't need response tokens, so use the input length directly
+	// Round up to nearest 1024 and cap at model max context
+	dynamicNumCtx := calculateDynamicNumCtx(maxInputLength, 0, modelMaxCtx)
+
+	// Override the NumCtx in request options
+	if req.Options == nil {
+		req.Options = make(map[string]any)
+	}
+	req.Options["num_ctx"] = dynamicNumCtx
+
+	// Schedule runner again with updated NumCtx
+	r, m, opts, err := s.scheduleRunner(c.Request.Context(), name.String(), []model.Capability{}, req.Options, req.KeepAlive)
+	if err != nil {
+		handleScheduleError(c, req.Model, err)
+		return
+	}
+
+	checkpointLoaded := time.Now()
+
+	var count int
+	for i, tokens := range tokenizedInputs {
+		s := input[i]
 
 		ctxLen := min(opts.NumCtx, int(kvData.ContextLength()))
 		if len(tokens) > ctxLen {
