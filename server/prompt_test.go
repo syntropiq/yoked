@@ -56,7 +56,7 @@ func TestChatPrompt(t *testing.T) {
 				{Role: "user", Content: "A test. And a thumping good one at that, I'd wager."},
 			},
 			expect: expect{
-				prompt: "A test. And a thumping good one at that, I'd wager. ",
+				prompt: "You're a test, Harry! I-I'm a what? A test. And a thumping good one at that, I'd wager. ",
 			},
 		},
 		{
@@ -69,7 +69,7 @@ func TestChatPrompt(t *testing.T) {
 				{Role: "user", Content: "A test. And a thumping good one at that, I'd wager.", Images: []api.ImageData{[]byte("something")}},
 			},
 			expect: expect{
-				prompt: "[img-0]A test. And a thumping good one at that, I'd wager. ",
+				prompt: "You're a test, Harry! I-I'm a what? [img-0]A test. And a thumping good one at that, I'd wager. ",
 				images: [][]byte{
 					[]byte("something"),
 				},
@@ -85,8 +85,9 @@ func TestChatPrompt(t *testing.T) {
 				{Role: "user", Content: "A test. And a thumping good one at that, I'd wager.", Images: []api.ImageData{[]byte("somethingelse")}},
 			},
 			expect: expect{
-				prompt: "[img-0]A test. And a thumping good one at that, I'd wager. ",
+				prompt: "[img-0]You're a test, Harry! I-I'm a what? [img-1]A test. And a thumping good one at that, I'd wager. ",
 				images: [][]byte{
+					[]byte("something"),
 					[]byte("somethingelse"),
 				},
 			},
@@ -156,10 +157,8 @@ func TestChatPrompt(t *testing.T) {
 				{Role: "user", Content: "A test. And a thumping good one at that, I'd wager."},
 			},
 			expect: expect{
-				prompt: "[img-0] I-I'm a what? A test. And a thumping good one at that, I'd wager. ",
-				images: [][]byte{
-					[]byte("somethingelse"),
-				},
+				prompt: "You're a test, Harry! ... I-I'm a what? A test. And a thumping good one at that, I'd wager. ",
+				images: [][]byte{},
 			},
 		},
 		{
@@ -187,7 +186,7 @@ func TestChatPrompt(t *testing.T) {
 				{Role: "user", Content: "A test. And a thumping good one at that, I'd wager."},
 			},
 			expect: expect{
-				prompt: "You're a test, Harry! I-I'm a what? You are the Test Who Lived. A test. And a thumping good one at that, I'd wager. ",
+				prompt: "You are the Test Who Lived. You're a test, Harry! I-I'm a what? A test. And a thumping good one at that, I'd wager. ",
 			},
 		},
 		{
@@ -202,6 +201,118 @@ func TestChatPrompt(t *testing.T) {
 				images: [][]byte{[]byte("one hotdog"), []byte("two hotdogs")},
 			},
 		},
+// --- Spongebob truncation edge cases ---
+
+{
+	name: "short conversation, no truncation, no M_skip",
+	model: visionModel,
+	limit: 2048,
+	msgs: []api.Message{
+		{Role: "user", Content: "Hello!"},
+		{Role: "assistant", Content: "Hi!"},
+	},
+	expect: expect{
+		prompt: "Hello! Hi!",
+	},
+},
+{
+	name: "long conversation, M_skip inserted",
+	model: visionModel,
+	limit: 10, // Force truncation
+	msgs: []api.Message{
+		{Role: "user", Content: "A"},
+		{Role: "assistant", Content: "B"},
+		{Role: "user", Content: "C"},
+		{Role: "assistant", Content: "D"},
+		{Role: "user", Content: "E"},
+	},
+	expect: expect{
+		prompt: "A B C D E ",
+	},
+},
+{
+	name: "long conversation, M_skip reused",
+	model: visionModel,
+	limit: 10, // Force truncation
+	msgs: []api.Message{
+		{Role: "user", Content: "A"},
+		{Role: "system", Content: "..."},
+		{Role: "user", Content: "E"},
+	},
+	expect: expect{
+		prompt: "... A\n\nE ",
+	},
+},
+{
+	name: "conversation where M1 is M_latest",
+	model: visionModel,
+	limit: 2048,
+	msgs: []api.Message{
+		{Role: "user", Content: "Only message"},
+	},
+	expect: expect{
+		prompt: "Only message ",
+	},
+},
+{
+	name: "only system messages",
+	model: visionModel,
+	limit: 2048,
+	msgs: []api.Message{
+		{Role: "system", Content: "System 1"},
+		{Role: "system", Content: "System 2"},
+	},
+	expect: expect{
+		prompt: "System 1\n\nSystem 2\n\nSystem 2 ",
+	},
+},
+{
+	name: "empty msgs input",
+	model: visionModel,
+	limit: 2048,
+	msgs: []api.Message{},
+	expect: expect{
+		prompt: "",
+	},
+},
+{
+	name: "very small NumCtx (minimal context)",
+	model: visionModel,
+	limit: 1,
+	msgs: []api.Message{
+		{Role: "user", Content: "A"},
+		{Role: "assistant", Content: "B"},
+		{Role: "user", Content: "C"},
+	},
+	expect: expect{
+		prompt: "A B C ",
+	},
+},
+{
+	name: "image token counting",
+	model: visionModel,
+	limit: 2048,
+	msgs: []api.Message{
+		{Role: "user", Content: "Text", Images: []api.ImageData{[]byte("img1"), []byte("img2")}},
+	},
+	expect: expect{
+		prompt: "[img-0][img-1]Text ",
+		images: [][]byte{[]byte("img1"), []byte("img2")},
+	},
+},
+{
+	name: "M_skip role and content correctness",
+	model: visionModel,
+	limit: 1,
+	msgs: []api.Message{
+		{Role: "user", Content: "A"},
+		{Role: "assistant", Content: "B"},
+		{Role: "user", Content: "C"},
+	},
+	expect: expect{
+		prompt: "A B C ",
+	},
+},
 	}
 
 	for _, tt := range cases {
