@@ -13,5 +13,5 @@
 - [x] Fix `NumCtx` scaling in `server/sched.go` (`pickBestFullFitByLibrary` and `pickBestPartialFitByLibrary`).
 - [x] Investigate test failures and identify root cause of `NumCtx` calculation inconsistencies.
 - [x] **CRITICAL DESIGN ISSUE**: Architectural review required for `NumCtx` dynamic calculation inconsistency between `GenerateHandler` and `ChatHandler` (see `ISSUE.md`).
-- [ ] Implement dynamic `NumCtx` calculation in `ChatHandler` by refactoring existing logic into a reusable function in `server/routes.go`.
-- [ ] Update `server/routes_generate_test.go` to include new test cases for `ChatHandler` and ensure existing tests pass with unified behavior.
+- [x] Implement dynamic `NumCtx` calculation in `ChatHandler` by refactoring existing logic into a reusable function in `server/routes.go`.
+- [x] Update `server/routes_generate_test.go` to include new test cases for `ChatHandler` and ensure existing tests pass with unified behavior.

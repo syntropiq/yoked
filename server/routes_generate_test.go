@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -53,6 +54,7 @@ func (mockRunner) Tokenize(_ context.Context, s string) (tokens []int, err error
 func newMockServer(mock *mockRunner) func(discover.GpuInfoList, string, *ggml.GGML, []string, []string, api.Options, int) (llm.LlamaServer, error) {
 	return func(_ discover.GpuInfoList, _ string, _ *ggml.GGML, _, _ []string, opts api.Options, numParallel int) (llm.LlamaServer, error) {
 		// Capture the options and numParallel for test assertions
+		fmt.Printf("DEBUG: Mock server called with NumCtx=%d, numParallel=%d\n", opts.Runner.NumCtx, numParallel)
 		mock.CapturedOptions = opts
 		mock.CapturedNumParallel = numParallel
 		return mock, nil
@@ -1129,7 +1131,7 @@ func TestDynamicNumCtxCalculation(t *testing.T) {
 			w := createRequest(t, s.ChatHandler, req)
 
 			if w.Code != http.StatusOK {
-				t.Errorf("expected status 200, got %d", w.Code)
+				t.Errorf("expected status 200, got %d. Response body: %s", w.Code, w.Body.String())
 				return
 			}
 
@@ -1269,7 +1271,7 @@ func TestDynamicNumCtxGenerateHandler(t *testing.T) {
 			w := createRequest(t, s.GenerateHandler, req)
 
 			if w.Code != http.StatusOK {
-				t.Errorf("expected status 200, got %d", w.Code)
+				t.Errorf("expected status 200, got %d. Response body: %s", w.Code, w.Body.String())
 				return
 			}
 

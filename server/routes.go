@@ -160,7 +160,7 @@ func (s *Server) calculateAndSetDynamicNumCtx(ctx context.Context, name string, 
 	for k, v := range requestOpts {
 		updatedOpts[k] = v
 	}
-	updatedOpts["num_ctx"] = dynamicNumCtx
+	updatedOpts["num_ctx"] = int64(dynamicNumCtx)
 
 	return updatedOpts, dynamicNumCtx, nil
 }
