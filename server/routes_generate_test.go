@@ -124,7 +124,7 @@ func TestGenerateChat(t *testing.T) {
 	})
 
 	w := createRequest(t, s.CreateHandler, api.CreateRequest{
-		Model: "test",
+		Name:  "test",
 		Files: map[string]string{"file.gguf": digest},
 		Template: `
 {{- if .Tools }}
@@ -189,7 +189,7 @@ func TestGenerateChat(t *testing.T) {
 			"bert.pooling_type":    uint32(0),
 		}, []*ggml.Tensor{})
 		w := createRequest(t, s.CreateHandler, api.CreateRequest{
-			Model:  "bert",
+			Name:   "bert",
 			Files:  map[string]string{"bert.gguf": digest},
 			Stream: &stream,
 		})
@@ -312,7 +312,7 @@ func TestGenerateChat(t *testing.T) {
 	})
 
 	w = createRequest(t, s.CreateHandler, api.CreateRequest{
-		Model:  "test-system",
+		Name:   "test-system",
 		From:   "test",
 		System: "You are a helpful assistant.",
 	})
@@ -687,7 +687,7 @@ func TestGenerate(t *testing.T) {
 	})
 
 	w := createRequest(t, s.CreateHandler, api.CreateRequest{
-		Model: "test",
+		Name:  "test",
 		Files: map[string]string{"file.gguf": digest},
 		Template: `
 {{- if .System }}System: {{ .System }} {{ end }}
@@ -730,7 +730,7 @@ func TestGenerate(t *testing.T) {
 		}, []*ggml.Tensor{})
 
 		w := createRequest(t, s.CreateHandler, api.CreateRequest{
-			Model:  "bert",
+			Name:   "bert",
 			Files:  map[string]string{"file.gguf": digest},
 			Stream: &stream,
 		})
@@ -868,7 +868,7 @@ func TestGenerate(t *testing.T) {
 	})
 
 	w = createRequest(t, s.CreateHandler, api.CreateRequest{
-		Model:  "test-system",
+		Name:   "test-system",
 		From:   "test",
 		System: "You are a helpful assistant.",
 	})
@@ -938,7 +938,7 @@ func TestGenerate(t *testing.T) {
 	})
 
 	w = createRequest(t, s.CreateHandler, api.CreateRequest{
-		Model: "test-suffix",
+		Name: "test-suffix",
 		Template: `{{- if .Suffix }}<PRE> {{ .Prompt }} <SUF>{{ .Suffix }} <MID>
 {{- else }}{{ .Prompt }}
 {{- end }}`,
@@ -1061,7 +1061,7 @@ func TestDynamicNumCtxCalculation(t *testing.T) {
 
 	stream := false
 	w := createRequest(t, s.CreateHandler, api.CreateRequest{
-		Model:  "test-dynamic",
+		Name:   "test-dynamic",
 		Files:  map[string]string{"file.gguf": digest},
 		Stream: &stream,
 	})
@@ -1218,7 +1218,7 @@ func TestDynamicNumCtxGenerateHandler(t *testing.T) {
 
 	stream := false
 	w := createRequest(t, s.CreateHandler, api.CreateRequest{
-		Model:  "test-generate-dynamic",
+		Name:   "test-generate-dynamic",
 		Files:  map[string]string{"file.gguf": digest},
 		Stream: &stream,
 	})
@@ -1362,7 +1362,7 @@ func TestNumCtxNotScaledByNumParallel(t *testing.T) {
 
 	stream := false
 	w := createRequest(t, s.CreateHandler, api.CreateRequest{
-		Model:  "test-scaling",
+		Name:   "test-scaling",
 		Files:  map[string]string{"file.gguf": digest},
 		Stream: &stream,
 	})

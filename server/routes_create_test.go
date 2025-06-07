@@ -11,6 +11,8 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -95,9 +97,14 @@ func createRequest(t *testing.T, fn func(*gin.Context), body any) *httptest.Resp
 	t.Logf("createRequest: about to call handler function with request method=%s, content-type=%s, body size=%d",
 		c.Request.Method, c.Request.Header.Get("Content-Type"), b.Len())
 
+	// Log what function we're about to call
+	funcName := runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).Name()
+	t.Logf("createRequest: calling function: %s", funcName)
+
 	fn(c)
 
 	t.Logf("createRequest: handler returned with status=%d", w.Code)
+	t.Logf("createRequest: response body: %s", w.Body.String())
 	return w.ResponseRecorder
 }
 

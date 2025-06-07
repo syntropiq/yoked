@@ -4,15 +4,23 @@
 
 Conduct a thorough investigation into the widespread test regressions, focusing on potential "simple and stupid" oversights related to `NumCtx` and `numParallel` handling, and the impact of the Spongebob truncation method. Based on the findings, formulate a revised, detailed plan for resolution.
 
-## Current Status
+## Current Status (Updated June 7, 2025)
 
-The following tests are currently failing:
+### ✅ RESOLVED: API Field Deprecation Issue
+
+**Successfully resolved `TestDynamicNumCtxCalculation` and `TestDynamicNumCtxGenerateHandler`:**
+- **Root Cause:** Automated tool changed `Name` to `Model` in CreateRequest structs, but server still uses deprecated `Name` field
+- **Resolution:** Reverted test CreateRequest instances back to using `Name` field
+- **Files Fixed:** `server/routes_generate_test.go` (10 instances)
+- **Status:** ✅ Tests now passing
+
+### Remaining Tests to Investigate:
 - `TestGenerateChat`
 - `TestGenerate`
-- `TestDynamicNumCtxCalculation`
-- `TestDynamicNumCtxGenerateHandler`
 - `TestNumCtxNotScaledByNumParallel`
 - `TestRequestsSameModelSameRequest`
+
+**Note:** The successful resolution of the CreateRequest issue demonstrates that some failures may be due to similar "simple and stupid" oversights rather than complex architectural problems.
 
 ## Investigation Strategy (Leveraging Debug Mode)
 
