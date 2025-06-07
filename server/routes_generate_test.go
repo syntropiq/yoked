@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -52,11 +53,19 @@ func (mockRunner) Tokenize(_ context.Context, s string) (tokens []int, err error
 
 func newMockServer(mock *mockRunner) func(discover.GpuInfoList, string, *ggml.GGML, []string, []string, api.Options, int) (llm.LlamaServer, error) {
 	return func(_ discover.GpuInfoList, _ string, _ *ggml.GGML, _, _ []string, opts api.Options, numParallel int) (llm.LlamaServer, error) {
+		// Log all calls to mock server for debugging
+		fmt.Printf("DEBUG: newMockServer called with NumCtx=%d, NumPredict=%d, numParallel=%d\n",
+			opts.Runner.NumCtx, opts.NumPredict, numParallel)
+
 		// Capture the options and numParallel for test assertions
 		// Only capture when NumCtx > 0 to avoid capturing from temp tokenization calls
 		if opts.Runner.NumCtx > 0 {
+			fmt.Printf("DEBUG: Capturing options - NumCtx=%d, NumPredict=%d, numParallel=%d\n",
+				opts.Runner.NumCtx, opts.NumPredict, numParallel)
 			mock.CapturedOptions = opts
 			mock.CapturedNumParallel = numParallel
+		} else {
+			fmt.Printf("DEBUG: Not capturing options - NumCtx=%d <= 0\n", opts.Runner.NumCtx)
 		}
 		return mock, nil
 	}
@@ -1181,10 +1190,17 @@ func TestDynamicNumCtxGenerateHandler(t *testing.T) {
 			getGpuFn:      discover.GetGPUInfo,
 			getCpuFn:      discover.GetCPUInfo,
 			reschedDelay:  250 * time.Millisecond,
-			loadFn: func(req *LlmRequest, _ *ggml.GGML, _ discover.GpuInfoList, _ int) {
+			loadFn: func(req *LlmRequest, ggml *ggml.GGML, gpus discover.GpuInfoList, numParallel int) {
 				time.Sleep(time.Millisecond)
+				// Call newServerFn to properly capture options for testing
+				// The signature is: func(gpus, model, ggml, adapters, projectors, opts, numParallel)
+				server, err := newMockServer(&mock)(gpus, req.model.ModelPath, ggml, nil, nil, req.opts, numParallel)
+				if err != nil {
+					req.errCh <- err
+					return
+				}
 				req.successCh <- &runnerRef{
-					llama: &mock,
+					llama: server,
 				}
 			},
 		},
@@ -1231,10 +1247,10 @@ func TestDynamicNumCtxGenerateHandler(t *testing.T) {
 		{
 			name:           "generate short prompt with default response",
 			prompt:         "Hello",
-			numPredict:     nil, // will use default 1024
+			numPredict:     nil, // will use remaining context
 			providedNumCtx: nil,
-			expectedNumCtx: 2048, // (1 + 1024) rounded up to nearest 1024
-			description:    "1 token prompt + 1024 default response = 1025, rounded to 2048",
+			expectedNumCtx: 4096, // (1 + 4095) = 4096, capped at modelMaxCtx
+			description:    "1 token prompt + remaining context (4095) = 4096",
 		},
 		{
 			name:           "generate medium prompt with custom response",

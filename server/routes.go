@@ -89,13 +89,18 @@ func modelOptions(model *Model, requestOpts map[string]any) (api.Options, error)
 
 // calculateDynamicNumCtx calculates the dynamic context size based on message length and response tokens
 func calculateDynamicNumCtx(messageLength int, maxResponseTokens int, modelMaxCtx int) int {
+	slog.Debug("calculateDynamicNumCtx", "messageLength", messageLength, "maxResponseTokens", maxResponseTokens, "modelMaxCtx", modelMaxCtx)
+
 	calculatedNumCtx := messageLength + maxResponseTokens
+	slog.Debug("calculateDynamicNumCtx: before rounding", "calculatedNumCtx", calculatedNumCtx)
 
 	// Round up to the nearest multiple of 1024
 	calculatedNumCtx = ((calculatedNumCtx + 1023) / 1024) * 1024
+	slog.Debug("calculateDynamicNumCtx: after rounding", "calculatedNumCtx", calculatedNumCtx)
 
 	// Cap at model's maximum context length
 	if calculatedNumCtx > modelMaxCtx {
+		slog.Debug("calculateDynamicNumCtx: capping to model max", "original", calculatedNumCtx, "capped", modelMaxCtx)
 		calculatedNumCtx = modelMaxCtx
 	}
 
@@ -106,25 +111,33 @@ func calculateDynamicNumCtx(messageLength int, maxResponseTokens int, modelMaxCt
 
 // determineMaxResponseTokens calculates the maximum response tokens based on NumPredict and available context
 func determineMaxResponseTokens(numPredict int, messageLength int, modelMaxCtx int) int {
+	slog.Debug("determineMaxResponseTokens", "numPredict", numPredict, "messageLength", messageLength, "modelMaxCtx", modelMaxCtx)
+
 	if numPredict > 0 {
+		slog.Debug("determineMaxResponseTokens: using provided numPredict", "value", numPredict)
 		return numPredict
 	}
 
-	// If NumPredict is -1 or not set, calculate based on remaining context
+	// If NumPredict is -1 or not set, use remaining context (preserves previous behavior)
 	remainingContext := modelMaxCtx - messageLength
 	if remainingContext < 1024 {
+		slog.Debug("determineMaxResponseTokens: remaining context too small, using minimum", "remainingContext", remainingContext, "minimum", 1024)
 		return 1024
 	}
 
+	slog.Debug("determineMaxResponseTokens: using remaining context", "value", remainingContext)
 	return remainingContext
 }
 
 // calculateAndSetDynamicNumCtx is a reusable function that calculates and sets dynamic NumCtx
 // It returns the updated options and the calculated NumCtx value
 func (s *Server) calculateAndSetDynamicNumCtx(ctx context.Context, name string, prompt string, requestOpts map[string]any, numPredict int, modelMaxCtx int, caps []model.Capability, keepAlive *api.Duration) (map[string]any, int, error) {
+	slog.Debug("calculateAndSetDynamicNumCtx START", "name", name, "prompt", prompt, "numPredict", numPredict, "modelMaxCtx", modelMaxCtx, "requestOpts", requestOpts)
+
 	// Temporarily schedule runner to get initial options and runner for tokenization
 	tempR, _, _, err := s.scheduleRunner(ctx, name, caps, requestOpts, keepAlive)
 	if err != nil {
+		slog.Debug("calculateAndSetDynamicNumCtx: scheduleRunner error", "error", err)
 		return nil, 0, err
 	}
 
@@ -133,16 +146,20 @@ func (s *Server) calculateAndSetDynamicNumCtx(ctx context.Context, name string, 
 	if prompt != "" {
 		tokens, err := tempR.Tokenize(ctx, prompt)
 		if err != nil {
+			slog.Debug("calculateAndSetDynamicNumCtx: tokenization error", "error", err)
 			return nil, 0, err
 		}
 		messageLength = len(tokens)
+		slog.Debug("calculateAndSetDynamicNumCtx: tokenization result", "tokens", tokens, "messageLength", messageLength)
 	}
 
 	// Determine max response tokens
 	maxResponseTokens := determineMaxResponseTokens(numPredict, messageLength, modelMaxCtx)
+	slog.Debug("calculateAndSetDynamicNumCtx: maxResponseTokens", "value", maxResponseTokens)
 
 	// Calculate dynamic NumCtx
 	dynamicNumCtx := calculateDynamicNumCtx(messageLength, maxResponseTokens, modelMaxCtx)
+	slog.Debug("calculateAndSetDynamicNumCtx: final dynamicNumCtx", "value", dynamicNumCtx)
 
 	// Log original NumCtx for debugging
 	originalNumCtx := 0
@@ -161,6 +178,7 @@ func (s *Server) calculateAndSetDynamicNumCtx(ctx context.Context, name string, 
 		updatedOpts[k] = v
 	}
 	updatedOpts["num_ctx"] = int64(dynamicNumCtx)
+	slog.Debug("calculateAndSetDynamicNumCtx: updatedOpts", "opts", updatedOpts)
 
 	return updatedOpts, dynamicNumCtx, nil
 }
