@@ -104,6 +104,9 @@ type reqBundle struct {
 }
 
 func (scenario *reqBundle) newServer(gpus discover.GpuInfoList, model string, f *ggml.GGML, adapters []string, projectors []string, opts api.Options, numParallel int) (llm.LlamaServer, error) {
+	// Capture the options for test assertions
+	scenario.srv.capturedOptions = opts
+	scenario.srv.capturedNumParallel = numParallel
 	return scenario.srv, nil
 }
 
@@ -765,6 +768,10 @@ type mockLlm struct {
 	estimatedVRAM      uint64
 	estimatedTotal     uint64
 	estimatedVRAMByGPU map[string]uint64
+
+	// Captured values for test assertions
+	capturedOptions     api.Options
+	capturedNumParallel int
 }
 
 func (s *mockLlm) Ping(ctx context.Context) error             { return s.pingResp }
@@ -793,3 +800,101 @@ func (s *mockLlm) EstimatedVRAM() uint64                  { return s.estimatedVR
 func (s *mockLlm) EstimatedTotal() uint64                 { return s.estimatedTotal }
 func (s *mockLlm) EstimatedVRAMByGPU(gpuid string) uint64 { return s.estimatedVRAMByGPU[gpuid] }
 func (s *mockLlm) Pid() int                               { return -1 }
+
+// TestSchedulerNumCtxNotScaled verifies that NumCtx is not scaled by numParallel
+func TestSchedulerNumCtxNotScaled(t *testing.T) {
+	ctx, done := context.WithTimeout(t.Context(), 500*time.Millisecond)
+	defer done()
+
+	s := InitScheduler(ctx)
+	s.getGpuFn = getGpuFn
+	s.getCpuFn = getCpuFn
+
+	scenario := newScenarioRequest(t, ctx, "test-numctx-scaling", 10, &api.Duration{Duration: 5 * time.Millisecond})
+	
+	// Set a specific NumCtx to verify it's not scaled
+	originalNumCtx := 2048
+	scenario.req.opts.Runner.NumCtx = originalNumCtx
+
+	// Capture the options and numParallel passed to the server
+	capturedServer := &mockLlm{estimatedVRAM: 10, estimatedVRAMByGPU: map[string]uint64{}}
+	s.newServerFn = func(gpus discover.GpuInfoList, model string, f *ggml.GGML, adapters []string, projectors []string, opts api.Options, numParallel int) (llm.LlamaServer, error) {
+		capturedServer.capturedOptions = opts
+		capturedServer.capturedNumParallel = numParallel
+		return capturedServer, nil
+	}
+
+	s.pendingReqCh <- scenario.req
+	s.Run(ctx)
+
+	select {
+	case resp := <-scenario.req.successCh:
+		require.Equal(t, resp.llama, capturedServer)
+		require.Empty(t, s.pendingReqCh)
+		require.Empty(t, scenario.req.errCh)
+
+		// Verify that NumCtx was NOT scaled by numParallel
+		actualNumCtx := capturedServer.capturedOptions.Runner.NumCtx
+		actualNumParallel := capturedServer.capturedNumParallel
+
+		require.Equal(t, originalNumCtx, actualNumCtx, "NumCtx should not be scaled by numParallel")
+		require.Greater(t, actualNumParallel, 0, "numParallel should still be passed to server")
+
+		// If NumCtx was scaled by numParallel, it would be much larger
+		scaledNumCtx := originalNumCtx * actualNumParallel
+		require.NotEqual(t, scaledNumCtx, actualNumCtx, "NumCtx should not equal originalNumCtx * numParallel")
+
+		t.Logf("NumCtx: %d (original: %d), numParallel: %d (correctly not scaled)", actualNumCtx, originalNumCtx, actualNumParallel)
+
+	case err := <-scenario.req.errCh:
+		t.Fatal(err.Error())
+	case <-ctx.Done():
+		t.Fatal("timeout")
+	}
+}
+
+// TestSchedulerOrigNumCtxPreservation verifies that origNumCtx is preserved in LlmRequest
+func TestSchedulerOrigNumCtxPreservation(t *testing.T) {
+	ctx, done := context.WithTimeout(t.Context(), 500*time.Millisecond)
+	defer done()
+
+	s := InitScheduler(ctx)
+	s.getGpuFn = getGpuFn
+	s.getCpuFn = getCpuFn
+
+	scenario := newScenarioRequest(t, ctx, "test-orig-numctx", 10, &api.Duration{Duration: 5 * time.Millisecond})
+	originalNumCtx := 4096
+	scenario.req.opts.Runner.NumCtx = originalNumCtx
+
+	// Capture what happens in the scheduler
+	var capturedOrigNumCtx int
+	var capturedNumCtx int
+
+	s.newServerFn = func(gpus discover.GpuInfoList, model string, f *ggml.GGML, adapters []string, projectors []string, opts api.Options, numParallel int) (llm.LlamaServer, error) {
+		return scenario.srv, nil
+	}
+
+	// Override loadFn to access the scheduler's internal state
+	s.loadFn = func(req *LlmRequest, f *ggml.GGML, gpus discover.GpuInfoList, numParallel int) {
+		capturedNumCtx = req.opts.Runner.NumCtx
+		capturedOrigNumCtx = req.origNumCtx
+		time.Sleep(time.Millisecond)
+		req.successCh <- &runnerRef{
+			llama: scenario.srv,
+		}
+	}
+
+	s.pendingReqCh <- scenario.req
+	s.Run(ctx)
+
+	select {
+	case resp := <-scenario.req.successCh:
+		require.Equal(t, resp.llama, scenario.srv)
+		require.Equal(t, originalNumCtx, capturedNumCtx, "NumCtx should match original")
+		require.Equal(t, originalNumCtx, capturedOrigNumCtx, "origNumCtx should be preserved")
+	case err := <-scenario.req.errCh:
+		t.Fatal(err.Error())
+	case <-ctx.Done():
+		t.Fatal("timeout")
+	}
+}

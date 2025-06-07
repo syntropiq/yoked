@@ -27,6 +27,10 @@ type mockRunner struct {
 	llm.CompletionRequest
 	llm.CompletionResponse
 	CompletionFn func(context.Context, llm.CompletionRequest, func(llm.CompletionResponse)) error
+
+	// Captured values for test assertions
+	CapturedOptions     api.Options
+	CapturedNumParallel int
 }
 
 func (m *mockRunner) Completion(ctx context.Context, r llm.CompletionRequest, fn func(r llm.CompletionResponse)) error {
@@ -47,7 +51,10 @@ func (mockRunner) Tokenize(_ context.Context, s string) (tokens []int, err error
 }
 
 func newMockServer(mock *mockRunner) func(discover.GpuInfoList, string, *ggml.GGML, []string, []string, api.Options, int) (llm.LlamaServer, error) {
-	return func(_ discover.GpuInfoList, _ string, _ *ggml.GGML, _, _ []string, _ api.Options, _ int) (llm.LlamaServer, error) {
+	return func(_ discover.GpuInfoList, _ string, _ *ggml.GGML, _, _ []string, opts api.Options, numParallel int) (llm.LlamaServer, error) {
+		// Capture the options and numParallel for test assertions
+		mock.CapturedOptions = opts
+		mock.CapturedNumParallel = numParallel
 		return mock, nil
 	}
 }
@@ -985,5 +992,265 @@ func TestGenerate(t *testing.T) {
 		if diff := cmp.Diff(mock.CompletionRequest.Prompt, "Help me write tests."); diff != "" {
 			t.Errorf("mismatch (-got +want):\n%s", diff)
 		}
+	})
+}
+
+// TestDynamicNumCtxCalculation tests the dynamic NumCtx sizing feature
+func TestDynamicNumCtxCalculation(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	mock := mockRunner{
+		CompletionResponse: llm.CompletionResponse{
+			Done:               true,
+			DoneReason:         llm.DoneReasonStop,
+			PromptEvalCount:    1,
+			PromptEvalDuration: 1,
+			EvalCount:          1,
+			EvalDuration:       1,
+		},
+	}
+
+	s := Server{
+		sched: &Scheduler{
+			pendingReqCh:  make(chan *LlmRequest, 1),
+			finishedReqCh: make(chan *LlmRequest, 1),
+			expiredCh:     make(chan *runnerRef, 1),
+			unloadedCh:    make(chan any, 1),
+			loaded:        make(map[string]*runnerRef),
+			newServerFn:   newMockServer(&mock),
+			getGpuFn:      discover.GetGPUInfo,
+			getCpuFn:      discover.GetCPUInfo,
+			reschedDelay:  250 * time.Millisecond,
+			loadFn: func(req *LlmRequest, _ *ggml.GGML, _ discover.GpuInfoList, _ int) {
+				time.Sleep(time.Millisecond)
+				req.successCh <- &runnerRef{
+					llama: &mock,
+				}
+			},
+		},
+	}
+
+	go s.sched.Run(t.Context())
+
+	// Create test model with specific context length
+	modelContextLength := uint32(8192)
+	_, digest := createBinFile(t, ggml.KV{
+		"general.architecture":          "llama",
+		"llama.block_count":             uint32(1),
+		"llama.context_length":          modelContextLength,
+		"llama.embedding_length":        uint32(4096),
+		"llama.attention.head_count":    uint32(32),
+		"llama.attention.head_count_kv": uint32(8),
+		"tokenizer.ggml.tokens":         []string{""},
+		"tokenizer.ggml.scores":         []float32{0},
+		"tokenizer.ggml.token_type":     []int32{0},
+	}, []*ggml.Tensor{
+		{Name: "token_embd.weight", Shape: []uint64{1}, WriterTo: bytes.NewReader(make([]byte, 4))},
+		{Name: "output.weight", Shape: []uint64{1}, WriterTo: bytes.NewReader(make([]byte, 4))},
+	})
+
+	stream := false
+	w := createRequest(t, s.CreateHandler, api.CreateRequest{
+		Model:  "test-dynamic",
+		Files:  map[string]string{"file.gguf": digest},
+		Stream: &stream,
+	})
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", w.Code)
+	}
+
+	testCases := []struct {
+		name           string
+		prompt         string
+		numPredict     *int
+		providedNumCtx *int
+		expectedNumCtx int
+		description    string
+	}{
+		{
+			name:           "short prompt with default response",
+			prompt:         "Hello",
+			numPredict:     nil, // will use default 1024
+			providedNumCtx: nil,
+			expectedNumCtx: 2048, // (1 + 1024) rounded up to nearest 1024
+			description:    "1 token prompt + 1024 default response = 1025, rounded to 2048",
+		},
+		{
+			name:           "medium prompt with custom response",
+			prompt:         "This is a medium length prompt that should be tokenized to multiple words",
+			numPredict:     &[]int{512}[0],
+			providedNumCtx: nil,
+			expectedNumCtx: 1024, // (11 + 512) rounded up to nearest 1024
+			description:    "11 token prompt + 512 response = 523, rounded to 1024",
+		},
+		{
+			name:           "provided NumCtx should be ignored",
+			prompt:         "Hello",
+			numPredict:     &[]int{100}[0],
+			providedNumCtx: &[]int{4096}[0], // Should be ignored
+			expectedNumCtx: 1024,            // (1 + 100) rounded up to nearest 1024
+			description:    "Provided NumCtx should be disregarded in favor of dynamic calculation",
+		},
+		{
+			name:           "NumPredict -1 uses model max",
+			prompt:         "Hi",
+			numPredict:     &[]int{-1}[0],
+			providedNumCtx: nil,
+			expectedNumCtx: int(modelContextLength), // Should use full model context
+			description:    "NumPredict -1 should use full model context length",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Reset captured values
+			mock.CapturedOptions = api.Options{}
+			mock.CapturedNumParallel = 0
+
+			req := api.ChatRequest{
+				Model: "test-dynamic",
+				Messages: []api.Message{
+					{Role: "user", Content: tc.prompt},
+				},
+				Stream: &stream,
+			}
+
+			if tc.numPredict != nil || tc.providedNumCtx != nil {
+				runner := map[string]any{}
+				if tc.numPredict != nil {
+					runner["NumPredict"] = *tc.numPredict
+				}
+				if tc.providedNumCtx != nil {
+					runner["NumCtx"] = *tc.providedNumCtx
+				}
+				req.Options = map[string]any{
+					"Runner": runner,
+				}
+			}
+
+			w := createRequest(t, s.ChatHandler, req)
+
+			if w.Code != http.StatusOK {
+				t.Errorf("expected status 200, got %d", w.Code)
+				return
+			}
+
+			if mock.CapturedOptions.Runner.NumCtx != tc.expectedNumCtx {
+				t.Errorf("%s: expected NumCtx %d, got %d", tc.description, tc.expectedNumCtx, mock.CapturedOptions.Runner.NumCtx)
+			}
+
+			// Verify that numParallel is still passed (should be > 0)
+			if mock.CapturedNumParallel <= 0 {
+				t.Errorf("expected numParallel > 0, got %d", mock.CapturedNumParallel)
+			}
+		})
+	}
+}
+
+// TestNumCtxNotScaledByNumParallel verifies that NumCtx is not scaled by numParallel
+func TestNumCtxNotScaledByNumParallel(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	mock := mockRunner{
+		CompletionResponse: llm.CompletionResponse{
+			Done:               true,
+			DoneReason:         llm.DoneReasonStop,
+			PromptEvalCount:    1,
+			PromptEvalDuration: 1,
+			EvalCount:          1,
+			EvalDuration:       1,
+		},
+	}
+
+	s := Server{
+		sched: &Scheduler{
+			pendingReqCh:  make(chan *LlmRequest, 1),
+			finishedReqCh: make(chan *LlmRequest, 1),
+			expiredCh:     make(chan *runnerRef, 1),
+			unloadedCh:    make(chan any, 1),
+			loaded:        make(map[string]*runnerRef),
+			newServerFn:   newMockServer(&mock),
+			getGpuFn:      discover.GetGPUInfo,
+			getCpuFn:      discover.GetCPUInfo,
+			reschedDelay:  250 * time.Millisecond,
+			loadFn: func(req *LlmRequest, _ *ggml.GGML, _ discover.GpuInfoList, _ int) {
+				time.Sleep(time.Millisecond)
+				req.successCh <- &runnerRef{
+					llama: &mock,
+				}
+			},
+		},
+	}
+
+	go s.sched.Run(t.Context())
+
+	_, digest := createBinFile(t, ggml.KV{
+		"general.architecture":          "llama",
+		"llama.block_count":             uint32(1),
+		"llama.context_length":          uint32(4096),
+		"llama.embedding_length":        uint32(4096),
+		"llama.attention.head_count":    uint32(32),
+		"llama.attention.head_count_kv": uint32(8),
+		"tokenizer.ggml.tokens":         []string{""},
+		"tokenizer.ggml.scores":         []float32{0},
+		"tokenizer.ggml.token_type":     []int32{0},
+	}, []*ggml.Tensor{
+		{Name: "token_embd.weight", Shape: []uint64{1}, WriterTo: bytes.NewReader(make([]byte, 4))},
+		{Name: "output.weight", Shape: []uint64{1}, WriterTo: bytes.NewReader(make([]byte, 4))},
+	})
+
+	stream := false
+	w := createRequest(t, s.CreateHandler, api.CreateRequest{
+		Model:  "test-scaling",
+		Files:  map[string]string{"file.gguf": digest},
+		Stream: &stream,
+	})
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", w.Code)
+	}
+
+	t.Run("NumCtx not scaled by numParallel", func(t *testing.T) {
+		// Reset captured values
+		mock.CapturedOptions = api.Options{}
+		mock.CapturedNumParallel = 0
+
+		req := api.ChatRequest{
+			Model: "test-scaling",
+			Messages: []api.Message{
+				{Role: "user", Content: "Test message"},
+			},
+			Stream: &stream,
+		}
+
+		w := createRequest(t, s.ChatHandler, req)
+
+		if w.Code != http.StatusOK {
+			t.Errorf("expected status 200, got %d", w.Code)
+			return
+		}
+
+		// Expected: 2 tokens (message) + 1024 (default response) = 1026, rounded to 2048
+		expectedNumCtx := 2048
+		actualNumCtx := mock.CapturedOptions.Runner.NumCtx
+		actualNumParallel := mock.CapturedNumParallel
+
+		if actualNumCtx != expectedNumCtx {
+			t.Errorf("expected NumCtx %d, got %d", expectedNumCtx, actualNumCtx)
+		}
+
+		// Verify that numParallel was passed but NumCtx was NOT scaled by it
+		if actualNumParallel <= 0 {
+			t.Errorf("expected numParallel > 0, got %d", actualNumParallel)
+		}
+
+		// If NumCtx was scaled by numParallel, it would be much larger
+		scaledNumCtx := expectedNumCtx * actualNumParallel
+		if actualNumCtx == scaledNumCtx {
+			t.Errorf("NumCtx appears to be scaled by numParallel (%d * %d = %d), but should not be", expectedNumCtx, actualNumParallel, scaledNumCtx)
+		}
+
+		t.Logf("NumCtx: %d, numParallel: %d (correctly not scaled)", actualNumCtx, actualNumParallel)
 	})
 }

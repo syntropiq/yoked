@@ -6,4 +6,8 @@
 - [x] Create a detailed plan for dynamic `NumCtx` sizing, including a Mermaid diagram.
 - [x] Write the issue and plan to `ISSUE.md` and `PLAN.md`.
 - [x] Implement the dynamic `NumCtx` sizing.
+- [x] Formulate a plan for updating tests.
+- [x] Implement the test updates.
 - [x] Investigate `NumPredict = -1` behavior and its effect on context calculation.
+- [ ] Investigate and resolve `NumCtx` scaling and preservation failures in `sched_test.go`.
+- [ ] Fix `NumCtx` scaling in `server/sched.go` (`pickBestFullFitByLibrary` and `pickBestPartialFitByLibrary`).

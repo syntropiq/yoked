@@ -37,8 +37,9 @@ Implement dynamic `NumCtx` sizing based on incoming message length + `max_respon
     *   `req.Options.Runner.NumCtx` will be set to `finalNumCtx` before calling `s.scheduleRunner`.
 
 7.  **Adjust Scheduler Logic (`server/sched.go`):**
-    *   The line `pending.opts.NumCtx = pending.origNumCtx * numParallel` (line 212 in `server/sched.go`) will be **removed**. The `numParallel` parameter passed to `llm.NewLlamaServer` will still be used for internal backend parallelism, but it will not scale the `NumCtx` value itself.
-    *   The `pickBestFullFitByLibrary` and `pickBestPartialFitByLibrary` functions, and `llm.EstimateGPULayers`, will continue to use `numParallel` for their memory estimations, but the `NumCtx` they receive will be the *final calculated* `NumCtx` for a single request.
+    *   **Remove `NumCtx` scaling in `pickBestFullFitByLibrary`**: The line `req.opts.NumCtx = req.origNumCtx * p` (around line 783) must be **removed**. This scaling is incorrect as `NumCtx` should represent the per-request context, not a scaled value for parallelism.
+    *   **Adjust `llm.PredictServerFit` call**: Instead of modifying `req.opts.NumCtx` within `pickBestFullFitByLibrary`, `llm.PredictServerFit` (and subsequently `llm.EstimateGPULayers`) should be called with `req.origNumCtx` (the unscaled, dynamically calculated `NumCtx` from `routes.go`) and `p` (the `numParallel` value) as separate parameters. This ensures that memory estimation correctly accounts for both the per-request context and the parallelism factor without incorrectly scaling `NumCtx`.
+    *   The `pickBestPartialFitByLibrary` function will also need to be reviewed to ensure similar scaling is not occurring there.
 
 8.  **Review `server/prompt.go` (Spongebob Truncation):**
     *   The `chatPrompt` function already uses `opts.NumCtx` for its truncation logic. By overriding `opts.NumCtx` earlier in `server/routes.go`, the Spongebob truncation will automatically adapt to the new dynamic context size. No direct changes are expected here.
@@ -66,3 +67,35 @@ graph TD
     O -- Passes --ctx-size (finalNumCtx) --> P[GGML Backend]
     P -- Uses finalNumCtx for KV Cache, Graph Size, RoPE --> Q[Model Execution]
     M -- (Spongebob Truncation uses finalNumCtx) --> R[server/prompt.go: chatPrompt()]
+```
+
+## Test Plan
+
+**Objective:** Identify all test files affected by the dynamic `NumCtx` sizing changes in `server/routes.go` and `server/sched.go`, analyze changed expectations, and formulate a plan for updating these tests.
+
+**Key Areas of Impact:**
+
+1.  **API Request Handling:** Tests that send `GenerateRequest` or `EmbedRequest` and explicitly set `NumCtx` or rely on default `NumCtx` behavior.
+2.  **Scheduler Logic:** Tests that verify how runners are scheduled, loaded, and how `NumCtx` influences resource allocation or parallelism.
+3.  **Prompt Truncation:** Tests that validate the "Spongebob truncation" logic, especially if they rely on a fixed context window.
+
+**Step-by-Step Test Updates:**
+
+1.  **`server/routes_generate_test.go`:**
+    *   **Modify `newMockServer`:** Enhance to capture the `api.Options` passed to it, allowing inspection of the `NumCtx` value sent to the backend.
+    *   **Add New Test Cases:**
+        *   Verify dynamic `NumCtx` calculation with varying prompt lengths and `NumPredict` values (including `-1`).
+        *   Assert that the `mockRunner.CompletionRequest.Options.NumCtx` matches the expected dynamic calculation (message length + `maxResponseTokens`, rounded up to nearest 1024, capped at `modelMaxCtx`).
+        *   Confirm that `NumCtx` provided in the `api.ChatRequest` or `api.GenerateRequest` is disregarded.
+        *   Add a specific test case for `NumPredict = -1` to ensure `maxResponseTokens` defaults to 1024 (or remaining context, capped at `modelMaxCtx`).
+
+2.  **`server/sched_test.go`:**
+    *   **Modify `mockLlm` (or `newServerFn` mock):** Capture `api.Options` and `numParallel` arguments passed to `llm.NewLlamaServer`.
+    *   **Update Assertions:** In relevant tests (e.g., `TestLoad`, `TestRequestsSameModelSameRequest`), assert that the `NumCtx` received by the mock server is the *dynamically calculated* `NumCtx` and *not* scaled by `numParallel`. This confirms the removal of the `NumCtx * numParallel` scaling.
+    *   **Review Memory Estimation Tests:** Ensure existing tests for `EstimateGPULayers` still pass. Consider adding new cases with dynamically calculated `NumCtx` and different `numParallel` values to confirm correct memory accounting.
+
+3.  **`server/prompt_test.go`:**
+    *   No direct changes are expected. The existing tests should continue to pass as `chatPrompt` uses the `opts.NumCtx` provided to it, which will now be the dynamically calculated value.
+
+4.  **`api/client_test.go` and `api/types_test.go`:**
+    *   No changes are expected, as these files do not directly interact with `NumCtx` or `NumPredict` in a way that would be affected by the dynamic sizing.
