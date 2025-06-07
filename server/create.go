@@ -55,7 +55,7 @@ func (s *Server) CreateHandler(c *gin.Context) {
 		}
 	}
 
-	name := model.ParseName(cmp.Or(r.Model, r.Name))
+	name := model.ParseName(r.Model)
 	if !name.IsValid() {
 		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": errtypes.InvalidModelNameErrMsg})
 		return
@@ -328,7 +328,7 @@ func createModel(r api.CreateRequest, name model.Name, baseLayers []*layerGGML, 
 	var layers []Layer
 	for _, layer := range baseLayers {
 		if layer.GGML != nil {
-			quantType := strings.ToUpper(cmp.Or(r.Quantize, r.Quantization))
+			quantType := strings.ToUpper(r.Quantize)
 			if quantType != "" && layer.GGML.Name() == "gguf" && layer.MediaType == "application/vnd.ollama.image.model" {
 				want, err := ggml.ParseFileType(quantType)
 				if err != nil {

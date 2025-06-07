@@ -1117,19 +1117,156 @@ func TestDynamicNumCtxCalculation(t *testing.T) {
 			}
 
 			if tc.numPredict != nil || tc.providedNumCtx != nil {
-				runner := map[string]any{}
+				req.Options = map[string]any{}
 				if tc.numPredict != nil {
-					runner["NumPredict"] = *tc.numPredict
+					req.Options["num_predict"] = *tc.numPredict
 				}
 				if tc.providedNumCtx != nil {
-					runner["NumCtx"] = *tc.providedNumCtx
-				}
-				req.Options = map[string]any{
-					"Runner": runner,
+					req.Options["num_ctx"] = *tc.providedNumCtx
 				}
 			}
 
 			w := createRequest(t, s.ChatHandler, req)
+
+			if w.Code != http.StatusOK {
+				t.Errorf("expected status 200, got %d", w.Code)
+				return
+			}
+
+			if mock.CapturedOptions.Runner.NumCtx != tc.expectedNumCtx {
+				t.Errorf("%s: expected NumCtx %d, got %d", tc.description, tc.expectedNumCtx, mock.CapturedOptions.Runner.NumCtx)
+			}
+
+			// Verify that numParallel is still passed (should be > 0)
+			if mock.CapturedNumParallel <= 0 {
+				t.Errorf("expected numParallel > 0, got %d", mock.CapturedNumParallel)
+			}
+		})
+	}
+}
+
+// TestDynamicNumCtxGenerateHandler tests that GenerateHandler also uses dynamic NumCtx calculation
+func TestDynamicNumCtxGenerateHandler(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	mock := mockRunner{
+		CompletionResponse: llm.CompletionResponse{
+			Done:               true,
+			DoneReason:         llm.DoneReasonStop,
+			PromptEvalCount:    1,
+			PromptEvalDuration: 1,
+			EvalCount:          1,
+			EvalDuration:       1,
+		},
+	}
+
+	s := Server{
+		sched: &Scheduler{
+			pendingReqCh:  make(chan *LlmRequest, 1),
+			finishedReqCh: make(chan *LlmRequest, 1),
+			expiredCh:     make(chan *runnerRef, 1),
+			unloadedCh:    make(chan any, 1),
+			loaded:        make(map[string]*runnerRef),
+			newServerFn:   newMockServer(&mock),
+			getGpuFn:      discover.GetGPUInfo,
+			getCpuFn:      discover.GetCPUInfo,
+			reschedDelay:  250 * time.Millisecond,
+			loadFn: func(req *LlmRequest, _ *ggml.GGML, _ discover.GpuInfoList, _ int) {
+				time.Sleep(time.Millisecond)
+				req.successCh <- &runnerRef{
+					llama: &mock,
+				}
+			},
+		},
+	}
+
+	go s.sched.Run(t.Context())
+
+	// Create test model with specific context length
+	modelContextLength := uint32(4096)
+	_, digest := createBinFile(t, ggml.KV{
+		"general.architecture":          "llama",
+		"llama.block_count":             uint32(1),
+		"llama.context_length":          modelContextLength,
+		"llama.embedding_length":        uint32(4096),
+		"llama.attention.head_count":    uint32(32),
+		"llama.attention.head_count_kv": uint32(8),
+		"tokenizer.ggml.tokens":         []string{""},
+		"tokenizer.ggml.scores":         []float32{0},
+		"tokenizer.ggml.token_type":     []int32{0},
+	}, []*ggml.Tensor{
+		{Name: "token_embd.weight", Shape: []uint64{1}, WriterTo: bytes.NewReader(make([]byte, 4))},
+		{Name: "output.weight", Shape: []uint64{1}, WriterTo: bytes.NewReader(make([]byte, 4))},
+	})
+
+	stream := false
+	w := createRequest(t, s.CreateHandler, api.CreateRequest{
+		Model:  "test-generate-dynamic",
+		Files:  map[string]string{"file.gguf": digest},
+		Stream: &stream,
+	})
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", w.Code)
+	}
+
+	testCases := []struct {
+		name           string
+		prompt         string
+		numPredict     *int
+		providedNumCtx *int
+		expectedNumCtx int
+		description    string
+	}{
+		{
+			name:           "generate short prompt with default response",
+			prompt:         "Hello",
+			numPredict:     nil, // will use default 1024
+			providedNumCtx: nil,
+			expectedNumCtx: 2048, // (1 + 1024) rounded up to nearest 1024
+			description:    "1 token prompt + 1024 default response = 1025, rounded to 2048",
+		},
+		{
+			name:           "generate medium prompt with custom response",
+			prompt:         "This is a medium length prompt",
+			numPredict:     &[]int{256}[0],
+			providedNumCtx: nil,
+			expectedNumCtx: 1024, // (6 + 256) rounded up to nearest 1024
+			description:    "6 token prompt + 256 response = 262, rounded to 1024",
+		},
+		{
+			name:           "generate provided NumCtx should be ignored",
+			prompt:         "Test",
+			numPredict:     &[]int{100}[0],
+			providedNumCtx: &[]int{2048}[0], // Should be ignored
+			expectedNumCtx: 1024,            // (1 + 100) rounded up to nearest 1024
+			description:    "Provided NumCtx should be disregarded in favor of dynamic calculation",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Reset captured values
+			mock.CapturedOptions = api.Options{}
+			mock.CapturedNumParallel = 0
+
+			req := api.GenerateRequest{
+				Model:  "test-generate-dynamic",
+				Prompt: tc.prompt,
+				Stream: &stream,
+			}
+
+			if tc.numPredict != nil || tc.providedNumCtx != nil {
+				req.Options = map[string]any{}
+				if tc.numPredict != nil {
+					req.Options["num_predict"] = *tc.numPredict
+				}
+				if tc.providedNumCtx != nil {
+					req.Options["num_ctx"] = *tc.providedNumCtx
+				}
+			}
+
+			w := createRequest(t, s.GenerateHandler, req)
 
 			if w.Code != http.StatusOK {
 				t.Errorf("expected status 200, got %d", w.Code)

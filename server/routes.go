@@ -90,17 +90,17 @@ func modelOptions(model *Model, requestOpts map[string]any) (api.Options, error)
 // calculateDynamicNumCtx calculates the dynamic context size based on message length and response tokens
 func calculateDynamicNumCtx(messageLength int, maxResponseTokens int, modelMaxCtx int) int {
 	calculatedNumCtx := messageLength + maxResponseTokens
-	
+
 	// Round up to the nearest multiple of 1024
 	calculatedNumCtx = ((calculatedNumCtx + 1023) / 1024) * 1024
-	
+
 	// Cap at model's maximum context length
 	if calculatedNumCtx > modelMaxCtx {
 		calculatedNumCtx = modelMaxCtx
 	}
-	
+
 	slog.Debug("calculateDynamicNumCtx", "messageLength", messageLength, "maxResponseTokens", maxResponseTokens, "modelMaxCtx", modelMaxCtx, "calculated", calculatedNumCtx)
-	
+
 	return calculatedNumCtx
 }
 
@@ -109,14 +109,60 @@ func determineMaxResponseTokens(numPredict int, messageLength int, modelMaxCtx i
 	if numPredict > 0 {
 		return numPredict
 	}
-	
+
 	// If NumPredict is -1 or not set, calculate based on remaining context
 	remainingContext := modelMaxCtx - messageLength
 	if remainingContext < 1024 {
 		return 1024
 	}
-	
+
 	return remainingContext
+}
+
+// calculateAndSetDynamicNumCtx is a reusable function that calculates and sets dynamic NumCtx
+// It returns the updated options and the calculated NumCtx value
+func (s *Server) calculateAndSetDynamicNumCtx(ctx context.Context, name string, prompt string, requestOpts map[string]any, numPredict int, modelMaxCtx int, caps []model.Capability, keepAlive *api.Duration) (map[string]any, int, error) {
+	// Temporarily schedule runner to get initial options and runner for tokenization
+	tempR, _, _, err := s.scheduleRunner(ctx, name, caps, requestOpts, keepAlive)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	// Calculate message length by tokenizing the prompt
+	var messageLength int
+	if prompt != "" {
+		tokens, err := tempR.Tokenize(ctx, prompt)
+		if err != nil {
+			return nil, 0, err
+		}
+		messageLength = len(tokens)
+	}
+
+	// Determine max response tokens
+	maxResponseTokens := determineMaxResponseTokens(numPredict, messageLength, modelMaxCtx)
+
+	// Calculate dynamic NumCtx
+	dynamicNumCtx := calculateDynamicNumCtx(messageLength, maxResponseTokens, modelMaxCtx)
+
+	// Log original NumCtx for debugging
+	originalNumCtx := 0
+	if requestOpts != nil {
+		if val, ok := requestOpts["num_ctx"]; ok {
+			if numCtx, ok := val.(int); ok {
+				originalNumCtx = numCtx
+			}
+		}
+	}
+	slog.Debug("NumCtx override", "original", originalNumCtx, "dynamic", dynamicNumCtx, "model", name)
+
+	// Override the NumCtx in request options
+	updatedOpts := make(map[string]any)
+	for k, v := range requestOpts {
+		updatedOpts[k] = v
+	}
+	updatedOpts["num_ctx"] = dynamicNumCtx
+
+	return updatedOpts, dynamicNumCtx, nil
 }
 
 // scheduleRunner schedules a runner after validating inputs such as capabilities and model options.
@@ -235,19 +281,18 @@ func (s *Server) GenerateHandler(c *gin.Context) {
 	}
 	modelMaxCtx := int(kvData.ContextLength())
 
-	// Temporarily schedule runner to get initial options and runner for tokenization
-	tempR, tempM, tempOpts, err := s.scheduleRunner(c.Request.Context(), name.String(), caps, req.Options, req.KeepAlive)
-	if err != nil {
-		handleScheduleError(c, req.Model, err)
-		return
-	}
-
-	// Calculate message length by tokenizing the prompt
-	var messageLength int
+	// Prepare the prompt for tokenization (same logic as later in the function)
+	var promptForTokenization string
 	if req.Prompt != "" {
-		// For generate requests, we need to prepare the full prompt including template processing
-		prompt := req.Prompt
+		promptForTokenization = req.Prompt
 		if !req.Raw {
+			// We need to get the model template to prepare the prompt properly
+			tempR, tempM, tempOpts, err := s.scheduleRunner(c.Request.Context(), name.String(), caps, req.Options, req.KeepAlive)
+			if err != nil {
+				handleScheduleError(c, req.Model, err)
+				return
+			}
+
 			tmpl := tempM.Template
 			if req.Template != "" {
 				tmpl, err = template.Parse(req.Template)
@@ -259,7 +304,7 @@ func (s *Server) GenerateHandler(c *gin.Context) {
 
 			var values template.Values
 			if req.Suffix != "" {
-				values.Prompt = prompt
+				values.Prompt = promptForTokenization
 				values.Suffix = req.Suffix
 			} else {
 				var msgs []api.Message
@@ -294,43 +339,41 @@ func (s *Server) GenerateHandler(c *gin.Context) {
 				return
 			}
 
-			prompt = b.String()
-		}
+			promptForTokenization = b.String()
 
-		// Tokenize the final prompt to get message length
-		tokens, err := tempR.Tokenize(c.Request.Context(), prompt)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-			return
-		}
-		messageLength = len(tokens)
-	}
+			// Get NumPredict from tempOpts for dynamic calculation
+			numPredict := tempOpts.NumPredict
 
-	// Determine max response tokens
-	maxResponseTokens := determineMaxResponseTokens(tempOpts.NumPredict, messageLength, modelMaxCtx)
-
-	// Calculate dynamic NumCtx
-	dynamicNumCtx := calculateDynamicNumCtx(messageLength, maxResponseTokens, modelMaxCtx)
-
-	// Log original NumCtx for debugging
-	originalNumCtx := 0
-	if req.Options != nil {
-		if val, ok := req.Options["num_ctx"]; ok {
-			if numCtx, ok := val.(int); ok {
-				originalNumCtx = numCtx
+			// Use the reusable function to calculate and set dynamic NumCtx
+			updatedOpts, _, err := s.calculateAndSetDynamicNumCtx(c.Request.Context(), name.String(), promptForTokenization, req.Options, numPredict, modelMaxCtx, caps, req.KeepAlive)
+			if err != nil {
+				handleScheduleError(c, req.Model, err)
+				return
 			}
+			req.Options = updatedOpts
+		} else {
+			// For raw requests, use NumPredict directly from request options
+			numPredict := -1
+			if req.Options != nil {
+				if val, ok := req.Options["num_predict"]; ok {
+					if np, ok := val.(int); ok {
+						numPredict = np
+					}
+				}
+			}
+
+			// Use the reusable function to calculate and set dynamic NumCtx
+			updatedOpts, _, err := s.calculateAndSetDynamicNumCtx(c.Request.Context(), name.String(), promptForTokenization, req.Options, numPredict, modelMaxCtx, caps, req.KeepAlive)
+			if err != nil {
+				handleScheduleError(c, req.Model, err)
+				return
+			}
+			req.Options = updatedOpts
 		}
 	}
-	slog.Debug("NumCtx override in generate", "original", originalNumCtx, "dynamic", dynamicNumCtx, "model", req.Model)
 
-	// Override the NumCtx in request options
-	if req.Options == nil {
-		req.Options = make(map[string]any)
-	}
-	req.Options["num_ctx"] = dynamicNumCtx
-
-	// Now schedule the runner again with the updated NumCtx
-	r, m, opts, err := s.scheduleRunner(c.Request.Context(), name.String(), caps, req.Options, req.KeepAlive)
+	// Now schedule the runner with the updated NumCtx
+	r, _, opts, err := s.scheduleRunner(c.Request.Context(), name.String(), caps, req.Options, req.KeepAlive)
 	if errors.Is(err, errCapabilityCompletion) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("%q does not support generate", req.Model)})
 		return
@@ -616,7 +659,7 @@ func (s *Server) EmbedHandler(c *gin.Context) {
 	req.Options["num_ctx"] = dynamicNumCtx
 
 	// Schedule runner again with updated NumCtx
-	r, m, opts, err := s.scheduleRunner(c.Request.Context(), name.String(), []model.Capability{}, req.Options, req.KeepAlive)
+	r, _, opts, err := s.scheduleRunner(c.Request.Context(), name.String(), []model.Capability{}, req.Options, req.KeepAlive)
 	if err != nil {
 		handleScheduleError(c, req.Model, err)
 		return
@@ -1653,7 +1696,65 @@ func (s *Server) ChatHandler(c *gin.Context) {
 		return
 	}
 
-	r, m, opts, err := s.scheduleRunner(c.Request.Context(), name.String(), caps, req.Options, req.KeepAlive)
+	// Calculate dynamic NumCtx before scheduling the runner
+	// Get model's maximum context length from GGUF metadata
+	m, err := GetModel(name.String())
+	if err != nil {
+		switch {
+		case errors.Is(err, fs.ErrNotExist):
+			c.JSON(http.StatusNotFound, gin.H{"error": fmt.Sprintf("model '%s' not found", req.Model)})
+		case err.Error() == errtypes.InvalidModelNameErrMsg:
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		default:
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		}
+		return
+	}
+
+	kvData, _, err := getModelData(m.ModelPath, false)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	modelMaxCtx := int(kvData.ContextLength())
+
+	// Prepare messages for prompt generation and tokenization
+	if len(req.Messages) > 0 {
+		msgs := append(m.Messages, req.Messages...)
+		if req.Messages[0].Role != "system" && m.System != "" {
+			msgs = append([]api.Message{{Role: "system", Content: m.System}}, msgs...)
+		}
+		msgs = filterThinkTags(msgs, m)
+
+		// Get temporary runner to generate the prompt for tokenization
+		tempR, tempM, tempOpts, err := s.scheduleRunner(c.Request.Context(), name.String(), caps, req.Options, req.KeepAlive)
+		if err != nil {
+			handleScheduleError(c, req.Model, err)
+			return
+		}
+
+		// Generate the prompt using chatPrompt function (similar to what happens later)
+		promptForTokenization, _, err := chatPrompt(c.Request.Context(), tempM, tempR.Tokenize, tempOpts, msgs, req.Tools, req.Think)
+		if err != nil {
+			slog.Error("chat prompt error during NumCtx calculation", "error", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+
+		// Get NumPredict from tempOpts for dynamic calculation
+		numPredict := tempOpts.NumPredict
+
+		// Use the reusable function to calculate and set dynamic NumCtx
+		updatedOpts, _, err := s.calculateAndSetDynamicNumCtx(c.Request.Context(), name.String(), promptForTokenization, req.Options, numPredict, modelMaxCtx, caps, req.KeepAlive)
+		if err != nil {
+			handleScheduleError(c, req.Model, err)
+			return
+		}
+		req.Options = updatedOpts
+	}
+
+	// Now schedule the runner with the updated NumCtx
+	r, _, opts, err := s.scheduleRunner(c.Request.Context(), name.String(), caps, req.Options, req.KeepAlive)
 	if errors.Is(err, errCapabilityCompletion) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("%q does not support chat", req.Model)})
 		return
