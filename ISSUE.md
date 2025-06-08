@@ -281,3 +281,46 @@ If a test failure is due to an expectation difference (e.g., the test expects 10
 - `server/sched.go`: Fixed `NumCtx` normalization bug in `needsReload` function.
 
 **Key Insight:** This fix ensures that when multiple requests come in for the same model with identical configurations, the scheduler correctly reuses the existing model runner instead of unnecessarily triggering a reload, which was causing the test timeout failures.
+
+---
+
+# Issue: Dynamic KV Cache Sizing and Per-Request Model Unloading
+
+## Problem Description
+
+The current KV cache management does not precisely align with the dynamically calculated `num_ctx` for each request, leading to potential context loss or inefficient resource utilization. While `num_ctx` is dynamically determined per request, the underlying KV cache of the loaded model instance has a fixed size (typically from Modelfile defaults). This mismatch can result in:
+
+1.  **Context Loss:** If the dynamically calculated `num_ctx` for a request exceeds the loaded model's fixed KV cache size, context may be truncated prematurely, even if the model itself supports a larger context. The `ShiftCacheSlot` mechanism, while improved, is a fallback for an already full cache, not a primary context management tool.
+2.  **Suboptimal Resource Use:** Models might be loaded with a fixed KV cache size that is either too small (leading to truncation) or unnecessarily large (wasting VRAM) for a given request's actual needs.
+3.  **Inconsistent Behavior:** The system's ability to maintain context is dependent on the fixed KV cache size of the loaded model, not the dynamically calculated `num_ctx` that reflects the current request's requirements.
+
+## Critical Requirement
+
+The system must **never lose context until the model's maximum context is reached**, but it should **not start the model off with max settings** if a smaller context is sufficient for the current request. This necessitates a precise matching of the loaded model's KV cache size to the request's dynamic `num_ctx`.
+
+## Chosen Approach: Per-Request Model Reload with Specific Dynamic `NumCtx`
+
+To meet the critical requirement, the chosen approach is to **reload the model for each request, setting its KV cache size to that request's specific dynamically calculated `num_ctx`**.
+
+**Rationale:**
+While this approach incurs a performance penalty (increased "time to first token" due to frequent model loading/unloading), it guarantees absolute context accuracy, which is paramount for use cases like legal fact-checking where context loss can have severe repercussions.
+
+**How it addresses the problem:**
+*   **Precise KV Cache Sizing:** Each loaded model instance will have its KV cache exactly sized to the `dynamicNumCtx` required by the current request.
+*   **Eliminates Premature Truncation:** Context will only be lost if the `dynamicNumCtx` itself exceeds the model's absolute maximum context, not due to a mismatch with a fixed, smaller KV cache.
+*   **Resource Optimization (per-request):** While loading overhead is high, the VRAM usage for a given inference will be precisely what's needed, not an over-provisioned maximum.
+
+## Proposed Solution Overview
+
+The solution involves modifying the scheduler to explicitly unload existing model instances and load new ones with a KV cache size that matches the `dynamicNumCtx` calculated for each incoming request.
+
+### Key Changes:
+
+1.  **Propagate Dynamic `NumCtx`:** The `dynamicNumCtx` calculated in `server/routes.go` will be passed to the scheduler via the `LlmRequest` struct.
+2.  **Scheduler Logic Update:**
+    *   The scheduler will compare the request's `DynamicNumCtx` with the `NumCtx` of any currently loaded model instance.
+    *   If they don't match, the existing instance will be unloaded, and a new instance will be loaded with its KV cache explicitly set to the `request_dynamic_num_ctx`.
+    *   After each inference, the model instance will be explicitly unloaded (unless an identical request is immediately pending).
+3.  **Runner Initialization:** Ensure the `llm.NewLlamaServer` and subsequent runner initialization correctly use the provided `NumCtx` to set the KV cache size.
+
+This approach ensures that the model's KV cache is always "ample enough" for the intended inference, as it will be precisely sized to the dynamically calculated context length, thereby minimizing context loss.

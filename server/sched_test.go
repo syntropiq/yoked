@@ -370,10 +370,10 @@ func TestGetRunner(t *testing.T) {
 	s.getCpuFn = getCpuFn
 	s.newServerFn = a.newServer
 	slog.Info("a")
-	successCh1a, errCh1a := s.GetRunner(a.ctx, a.req.model, a.req.opts, a.req.sessionDuration)
+	successCh1a, errCh1a := s.GetRunner(a.ctx, a.req.model, a.req.opts, a.req.sessionDuration, 0)
 	require.Len(t, s.pendingReqCh, 1)
 	slog.Info("b")
-	successCh1b, errCh1b := s.GetRunner(b.ctx, b.req.model, b.req.opts, b.req.sessionDuration)
+	successCh1b, errCh1b := s.GetRunner(b.ctx, b.req.model, b.req.opts, b.req.sessionDuration, 0)
 	require.Len(t, s.pendingReqCh, 1)
 	require.Empty(t, successCh1b)
 	require.Len(t, errCh1b, 1)
@@ -397,7 +397,7 @@ func TestGetRunner(t *testing.T) {
 
 	c.req.model.ModelPath = "bad path"
 	slog.Info("c")
-	successCh1c, errCh1c := s.GetRunner(c.ctx, c.req.model, c.req.opts, c.req.sessionDuration)
+	successCh1c, errCh1c := s.GetRunner(c.ctx, c.req.model, c.req.opts, c.req.sessionDuration, 0)
 	// Starts in pending channel, then should be quickly processed to return an error
 	time.Sleep(50 * time.Millisecond) // Long enough for the "a" model to expire and unload
 	require.Empty(t, successCh1c)
@@ -471,7 +471,7 @@ func TestPrematureExpired(t *testing.T) {
 		return []discover.GpuInfo{g}
 	}
 	s.newServerFn = scenario1a.newServer
-	successCh1a, errCh1a := s.GetRunner(scenario1a.ctx, scenario1a.req.model, scenario1a.req.opts, scenario1a.req.sessionDuration)
+	successCh1a, errCh1a := s.GetRunner(scenario1a.ctx, scenario1a.req.model, scenario1a.req.opts, scenario1a.req.sessionDuration, 0)
 	require.Len(t, s.pendingReqCh, 1)
 	s.Run(ctx)
 	select {
@@ -811,7 +811,7 @@ func TestSchedulerNumCtxNotScaled(t *testing.T) {
 	s.getCpuFn = getCpuFn
 
 	scenario := newScenarioRequest(t, ctx, "test-numctx-scaling", 10, &api.Duration{Duration: 5 * time.Millisecond})
-	
+
 	// Set a specific NumCtx to verify it's not scaled
 	originalNumCtx := 2048
 	scenario.req.opts.Runner.NumCtx = originalNumCtx

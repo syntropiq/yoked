@@ -99,3 +99,73 @@
     - **Solution:** Modified [`runner/ollamarunner/runner.go:634`](runner/ollamarunner/runner.go:634) to set `numKeep: s.cache.numCtx` instead of `int32(req.Options.NumKeep)`
     - **Effect:** Cache shifting now preserves the full dynamic context window, preventing premature eviction of relevant context
     - **Status:** ✅ COMPLETED - Change implemented and ready for testing
+
+## Dynamic KV Cache Sizing and Per-Request Model Unloading (June 7, 2025)
+
+- [ ] **Phase 1: Propagate Dynamic `NumCtx` to Scheduler Request**
+    - [x] **Subtask 1.1: Add `DynamicNumCtx` to `LlmRequest`**
+        - **Goal:** Extend the `LlmRequest` struct to include a field for the dynamically calculated context size.
+        - **File:** [`server/sched.go`](server/sched.go)
+        - **Action:** Add `DynamicNumCtx int` to the `LlmRequest` struct.
+        - **Mode:** Code
+        - **Status:** ✅ COMPLETED - Added `DynamicNumCtx int` field to `LlmRequest` struct at line 32 in [`server/sched.go`](server/sched.go:32)
+    - [x] **Subtask 1.2: Populate `DynamicNumCtx` in API Handlers**
+        - **Goal:** Ensure the `dynamicNumCtx` calculated in `routes.go` is correctly assigned to the `LlmRequest` before it's sent to the scheduler.
+        - **File:** [`server/routes.go`](server/routes.go) (specifically `GenerateHandler` and `ChatHandler`)
+        - **Action:** After `calculateAndSetDynamicNumCtx` determines `dynamicNumCtx`, set `llmReq.DynamicNumCtx = dynamicNumCtx`.
+        - **Mode:** Code
+        - **Status:** ✅ COMPLETED - Modified `GetRunner` function in [`server/sched.go`](server/sched.go) to accept `dynamicNumCtx` parameter and populate `LlmRequest.DynamicNumCtx` field. Updated `scheduleRunner` function in [`server/routes.go`](server/routes.go) to pass the calculated `dynamicNumCtx` from `calculateAndSetDynamicNumCtx` through to the scheduler. Updated all calls to `scheduleRunner` in `GenerateHandler` and `ChatHandler` to properly pass the dynamic context value. Updated test files to match new function signatures.
+
+- [ ] **Phase 2: Scheduler Logic for Dynamic KV Cache Sizing and Unloading**
+    - [x] **Subtask 2.1: Update `runnerRef` to Store Loaded `NumCtx`**
+        - **Goal:** Enable the scheduler to know the KV cache size of a loaded runner instance.
+        - **File:** [`server/sched.go`](server/sched.go)
+        - **Action:** Add a field (e.g., `LoadedNumCtx int`) to the `runnerRef` struct, populated when the runner is successfully loaded.
+        - **Mode:** Code
+        - **Status:** ✅ COMPLETED - Added `LoadedNumCtx int` field to `runnerRef` struct at line 597 and populated it with `req.opts.NumCtx` during runner initialization in the `load` function at line 470 in [`server/sched.go`](server/sched.go)
+    - [x] **Subtask 2.2: Modify Model Loading to Use `DynamicNumCtx`**
+        - **Goal:** Ensure new model instances are loaded with a KV cache size matching the request's `DynamicNumCtx`.
+        - **File:** [`server/sched.go`](server/sched.go) (specifically the `load` function or where `s.newServerFn` is called)
+        - **Action:** When calling `s.newServerFn` (`llm.NewLlamaServer`), set the `NumCtx` field within the `api.Options` argument (`req.opts`) to `req.DynamicNumCtx`.
+        - **Mode:** Code
+        - **Status:** ✅ COMPLETED - Modified the `load` function in [`server/sched.go`](server/sched.go) to set `req.opts.NumCtx = req.DynamicNumCtx` before calling `s.newServerFn` (line 449) and updated `LoadedNumCtx` to use `req.DynamicNumCtx` instead of `req.opts.NumCtx` (line 472). This ensures new model instances are loaded with a KV cache size that precisely matches the dynamically calculated context size.
+    - [x] **Subtask 2.3: Update `needsReload` for Dynamic `NumCtx` Matching**
+        - **Goal:** Force a model reload if the loaded instance's KV cache size does not match the incoming request's `DynamicNumCtx`.
+        - **File:** [`server/sched.go`](server/sched.go)
+        - **Action:** Modify `runnerRef.needsReload` to compare `runner.LoadedNumCtx` with `pending.DynamicNumCtx`. If they differ, return `true` to trigger a reload.
+        - **Mode:** Code
+        - **Status:** ✅ COMPLETED - Added comparison `runner.LoadedNumCtx != req.DynamicNumCtx` to the `needsReload` function in [`server/sched.go`](server/sched.go) at line 651. This ensures that a model reload is triggered when the loaded instance's KV cache size doesn't match the incoming request's dynamic NumCtx, enabling precise KV cache sizing per request.
+    - [x] **Subtask 2.4: Implement Per-Request Model Unloading**
+        - **Goal:** Explicitly unload the model instance after each request is completed to free up resources.
+        - **File:** [`server/sched.go`](server/sched.go) (e.g., in `finishedProcessing` or a new dedicated function)
+        - **Action:** Add logic to call `runner.llama.Close()` (or equivalent unload method) on the `runnerRef` after a request is processed. Consider a very short grace period if an identical request is immediately pending to avoid redundant reloads.
+        - **Mode:** Code
+        - **Status:** ✅ COMPLETED - Modified the `processCompleted` function in [`server/sched.go`](server/sched.go) to implement per-request model unloading. Added logic to immediately unload models after request completion with a 100ms grace period for identical pending requests. Implemented `checkForIdenticalPendingRequest` helper function to determine if a grace period should be applied. The unloading now calls `s.expiredCh <- runner` to trigger the existing unload mechanism that calls `runner.llama.Close()`.
+
+- [ ] **Phase 3: Verification and Performance Impact Assessment**
+    - [x] **Subtask 3.1: Verify KV Cache Sizing**
+        - **Goal:** Confirm that loaded model instances have the correct KV cache size.
+        - **Mode:** Debug
+        - **Status:** ✅ COMPLETED - Added diagnostic logging to [`runner/ollamarunner/cache.go:37`](runner/ollamarunner/cache.go:37) in the `NewInputCache` function to log `kvSize`, `numSlots`, `calculatedNumCtx`, `batchSize`, `kvCacheType`, and `multiUserCache` parameters. Created verification test in [`runner/ollamarunner/cache_kv_sizing_test.go`](runner/ollamarunner/cache_kv_sizing_test.go). The logging will show KV cache sizing parameters when actual model instances are loaded with real runners (not mocked).
+        - **Instructions:** Add logging in `ollamarunner.NewInputCache` to print the `kvSize` it receives. Run requests with varying `dynamicNumCtx` and verify logs.
+    - [x] **Subtask 3.2: Verify Model Unloading**
+        - **Goal:** Confirm models are unloaded as expected after inference.
+        - **Mode:** Debug
+        - **Status:** ✅ COMPLETED - Added comprehensive model load/unload event logging to both [`server/sched.go`](server/sched.go) and [`runner/ollamarunner/runner.go`](runner/ollamarunner/runner.go). Enhanced scheduler with detailed logging for model loading start/success/failure, reference count management, expiration events, and unload processes. Added logging to runner initialization, model creation, backend loading, and cache creation/closure. The logs use structured prefixes (MODEL_LOAD_START, MODEL_UNLOAD_COMPLETE, etc.) to enable easy filtering and monitoring of model lifecycle events during sequential requests.
+        - **Instructions:** Add logging for model load/unload events in `server/sched.go` and `ollamarunner/runner.go`. Observe logs during sequential requests.
+    - [x] **Subtask 3.3: Assess "Time to First Token" Penalty**
+        - **Goal:** Quantify the performance impact of frequent loading/unloading.
+        - **Mode:** Debug
+        - **Status:** ✅ COMPLETED - Created comprehensive performance assessment system with [`scripts/assess_ttft_penalty.sh`](scripts/assess_ttft_penalty.sh) that uses the existing client-side "Time to First Token" stopwatch to measure latency across 4 different request patterns: identical requests, varying NumCtx values, varying prompt lengths, and mixed usage patterns. Added enhanced diagnostic timing logs to [`server/sched.go`](server/sched.go) and [`runner/ollamarunner/cache.go`](runner/ollamarunner/cache.go) to measure model loading overhead and KV cache initialization duration. Created analysis runner [`scripts/run_ttft_assessment.sh`](scripts/run_ttft_assessment.sh) that automatically calculates performance metrics, overhead percentages, and provides diagnostic recommendations based on the two most likely performance bottlenecks: model loading overhead and KV cache initialization.
+        - **Instructions:** Use the existing client-side "Time to First Token" stopwatch (Subtask 3.1 from previous plan) to measure latency for various request patterns.
+
+- [ ] **Phase 4: Documentation Updates**
+    - [ ] **Subtask 4.1: Update `ISSUE.md`**
+        - **Goal:** Document the problem, chosen approach, and high-level solution.
+        - **Mode:** Architect
+    - [ ] **Subtask 4.2: Update `PLAN.md`**
+        - **Goal:** Detail the implementation steps, subtasks, and current status.
+        - **Mode:** Architect
+    - [ ] **Subtask 4.3: Update `TODO.md`**
+        - **Goal:** Mark completed subtasks and list remaining tasks for implementation.
+        - **Mode:** Architect

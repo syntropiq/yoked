@@ -143,7 +143,7 @@ func (s *Server) calculateAndSetDynamicNumCtx(ctx context.Context, name string, 
 	slog.Debug("calculateAndSetDynamicNumCtx START", "name", name, "prompt", prompt, "numPredict", numPredict, "modelMaxCtx", modelMaxCtx, "requestOpts", requestOpts)
 
 	// Temporarily schedule runner to get initial options and runner for tokenization
-	tempR, _, _, err := s.scheduleRunner(ctx, name, caps, requestOpts, keepAlive)
+	tempR, _, _, err := s.scheduleRunner(ctx, name, caps, requestOpts, keepAlive, 0)
 	if err != nil {
 		slog.Debug("calculateAndSetDynamicNumCtx: scheduleRunner error", "error", err)
 		return nil, 0, err
@@ -202,7 +202,7 @@ func (s *Server) calculateAndSetDynamicNumCtx(ctx context.Context, name string, 
 
 // scheduleRunner schedules a runner after validating inputs such as capabilities and model options.
 // It returns the allocated runner, model instance, and consolidated options if successful and error otherwise.
-func (s *Server) scheduleRunner(ctx context.Context, name string, caps []model.Capability, requestOpts map[string]any, keepAlive *api.Duration) (llm.LlamaServer, *Model, *api.Options, error) {
+func (s *Server) scheduleRunner(ctx context.Context, name string, caps []model.Capability, requestOpts map[string]any, keepAlive *api.Duration, dynamicNumCtx int) (llm.LlamaServer, *Model, *api.Options, error) {
 	if name == "" {
 		return nil, nil, nil, fmt.Errorf("model %w", errRequired)
 	}
@@ -225,7 +225,7 @@ func (s *Server) scheduleRunner(ctx context.Context, name string, caps []model.C
 		return nil, nil, nil, err
 	}
 
-	runnerCh, errCh := s.sched.GetRunner(ctx, model, opts, keepAlive)
+	runnerCh, errCh := s.sched.GetRunner(ctx, model, opts, keepAlive, dynamicNumCtx)
 	var runner *runnerRef
 	select {
 	case runner = <-runnerCh:
@@ -323,11 +323,12 @@ func (s *Server) GenerateHandler(c *gin.Context) {
 
 	// Prepare the prompt for tokenization (same logic as later in the function)
 	var promptForTokenization string
+	var dynamicNumCtx int
 	if req.Prompt != "" {
 		promptForTokenization = req.Prompt
 		if !req.Raw {
 			// We need to get the model template to prepare the prompt properly
-			tempR, tempM, tempOpts, err := s.scheduleRunner(c.Request.Context(), name.String(), caps, req.Options, req.KeepAlive)
+			tempR, tempM, tempOpts, err := s.scheduleRunner(c.Request.Context(), name.String(), caps, req.Options, req.KeepAlive, 0)
 			if err != nil {
 				handleScheduleError(c, req.Model, err)
 				return
@@ -385,12 +386,13 @@ func (s *Server) GenerateHandler(c *gin.Context) {
 			numPredict := tempOpts.NumPredict
 
 			// Use the reusable function to calculate and set dynamic NumCtx
-			updatedOpts, _, err := s.calculateAndSetDynamicNumCtx(c.Request.Context(), name.String(), promptForTokenization, req.Options, numPredict, modelMaxCtx, caps, req.KeepAlive)
+			updatedOpts, calculatedDynamicNumCtx, err := s.calculateAndSetDynamicNumCtx(c.Request.Context(), name.String(), promptForTokenization, req.Options, numPredict, modelMaxCtx, caps, req.KeepAlive)
 			if err != nil {
 				handleScheduleError(c, req.Model, err)
 				return
 			}
 			req.Options = updatedOpts
+			dynamicNumCtx = calculatedDynamicNumCtx
 		} else {
 			// For raw requests, use NumPredict directly from request options
 			numPredict := -1
@@ -403,17 +405,19 @@ func (s *Server) GenerateHandler(c *gin.Context) {
 			}
 
 			// Use the reusable function to calculate and set dynamic NumCtx
-			updatedOpts, _, err := s.calculateAndSetDynamicNumCtx(c.Request.Context(), name.String(), promptForTokenization, req.Options, numPredict, modelMaxCtx, caps, req.KeepAlive)
+			updatedOpts, calculatedDynamicNumCtx, err := s.calculateAndSetDynamicNumCtx(c.Request.Context(), name.String(), promptForTokenization, req.Options, numPredict, modelMaxCtx, caps, req.KeepAlive)
 			if err != nil {
 				handleScheduleError(c, req.Model, err)
 				return
 			}
 			req.Options = updatedOpts
+			dynamicNumCtx = calculatedDynamicNumCtx
 		}
+	} else {
+		dynamicNumCtx = 0
 	}
 
-	// Now schedule the runner with the updated NumCtx
-	r, _, opts, err := s.scheduleRunner(c.Request.Context(), name.String(), caps, req.Options, req.KeepAlive)
+	r, _, opts, err := s.scheduleRunner(c.Request.Context(), name.String(), caps, req.Options, req.KeepAlive, dynamicNumCtx)
 	if errors.Is(err, errCapabilityCompletion) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("%q does not support generate", req.Model)})
 		return
@@ -668,7 +672,7 @@ func (s *Server) EmbedHandler(c *gin.Context) {
 
 	// Calculate dynamic NumCtx for embedding based on the longest input
 	// First, we need a temporary runner to tokenize inputs
-	tempR, _, _, err := s.scheduleRunner(c.Request.Context(), name.String(), []model.Capability{}, req.Options, req.KeepAlive)
+	tempR, _, _, err := s.scheduleRunner(c.Request.Context(), name.String(), []model.Capability{}, req.Options, req.KeepAlive, 0)
 	if err != nil {
 		handleScheduleError(c, req.Model, err)
 		return
@@ -699,7 +703,7 @@ func (s *Server) EmbedHandler(c *gin.Context) {
 	req.Options["num_ctx"] = dynamicNumCtx
 
 	// Schedule runner again with updated NumCtx
-	r, _, opts, err := s.scheduleRunner(c.Request.Context(), name.String(), []model.Capability{}, req.Options, req.KeepAlive)
+	r, _, opts, err := s.scheduleRunner(c.Request.Context(), name.String(), []model.Capability{}, req.Options, req.KeepAlive, 0)
 	if err != nil {
 		handleScheduleError(c, req.Model, err)
 		return
@@ -792,7 +796,7 @@ func (s *Server) EmbeddingsHandler(c *gin.Context) {
 		return
 	}
 
-	r, _, _, err := s.scheduleRunner(c.Request.Context(), name.String(), []model.Capability{}, req.Options, req.KeepAlive)
+	r, _, _, err := s.scheduleRunner(c.Request.Context(), name.String(), []model.Capability{}, req.Options, req.KeepAlive, 0)
 	if err != nil {
 		handleScheduleError(c, req.Model, err)
 		return
@@ -1769,6 +1773,7 @@ func (s *Server) ChatHandler(c *gin.Context) {
 	modelMaxCtx := int(kvData.ContextLength())
 
 	// Prepare messages for prompt generation and tokenization
+	var dynamicNumCtxForScheduler int
 	if len(req.Messages) > 0 {
 		msgs := append(m.Messages, req.Messages...)
 		if req.Messages[0].Role != "system" && m.System != "" {
@@ -1777,7 +1782,7 @@ func (s *Server) ChatHandler(c *gin.Context) {
 		msgs = filterThinkTags(msgs, m)
 
 		// Get temporary runner to generate the prompt for tokenization
-		tempR, tempM, tempOpts, err := s.scheduleRunner(c.Request.Context(), name.String(), caps, req.Options, req.KeepAlive)
+		tempR, tempM, tempOpts, err := s.scheduleRunner(c.Request.Context(), name.String(), caps, req.Options, req.KeepAlive, 0)
 		if err != nil {
 			handleScheduleError(c, req.Model, err)
 			return
@@ -1795,16 +1800,16 @@ func (s *Server) ChatHandler(c *gin.Context) {
 		numPredict := tempOpts.NumPredict
 
 		// Use the reusable function to calculate and set dynamic NumCtx
-		updatedOpts, _, err := s.calculateAndSetDynamicNumCtx(c.Request.Context(), name.String(), promptForTokenization, req.Options, numPredict, modelMaxCtx, caps, req.KeepAlive)
+		updatedOpts, dynamicNumCtx, err := s.calculateAndSetDynamicNumCtx(c.Request.Context(), name.String(), promptForTokenization, req.Options, numPredict, modelMaxCtx, caps, req.KeepAlive)
 		if err != nil {
 			handleScheduleError(c, req.Model, err)
 			return
 		}
 		req.Options = updatedOpts
+		dynamicNumCtxForScheduler = dynamicNumCtx
 	}
 
-	// Now schedule the runner with the updated NumCtx
-	r, _, opts, err := s.scheduleRunner(c.Request.Context(), name.String(), caps, req.Options, req.KeepAlive)
+	r, _, opts, err := s.scheduleRunner(c.Request.Context(), name.String(), caps, req.Options, req.KeepAlive, dynamicNumCtxForScheduler)
 	if errors.Is(err, errCapabilityCompletion) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("%q does not support chat", req.Model)})
 		return

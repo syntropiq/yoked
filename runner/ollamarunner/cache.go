@@ -32,7 +32,19 @@ type InputCache struct {
 }
 
 func NewInputCache(model model.Model, kvCacheType string, kvSize int32, numSlots int, batchSize int, multiUserCache bool) (*InputCache, error) {
+	// TTFT_TIMING: Start timing KV cache creation for performance assessment
+	cacheCreateStartTime := time.Now()
 	numCtx := kvSize / int32(numSlots)
+
+	// DIAGNOSTIC: Log KV cache sizing parameters for Subtask 3.1 and 3.2 verification
+	slog.Info("CACHE_CREATE_START: KV cache creation initiated",
+		"kvSize", kvSize,
+		"numSlots", numSlots,
+		"calculatedNumCtx", numCtx,
+		"batchSize", batchSize,
+		"kvCacheType", kvCacheType,
+		"multiUserCache", multiUserCache,
+		"cache_create_start_time", cacheCreateStartTime.Format(time.RFC3339Nano))
 
 	if numCtx < 1 {
 		return nil, fmt.Errorf("must have at least one kv cache entry per parallel sequence (kv: %v parallel: %v)", kvSize, numSlots)
@@ -46,16 +58,25 @@ func NewInputCache(model model.Model, kvCacheType string, kvSize int32, numSlots
 
 	cache := model.Config().Cache
 	if cache != nil {
+		slog.Info("CACHE_INIT_START: Initializing backend cache", "numSlots", numSlots, "numCtx", numCtx, "batchSize", batchSize, "kvCacheType", kvCacheType)
 		cache.Init(model.Backend(), kvCacheTypeFromStr(kvCacheType), numSlots, int(numCtx), batchSize)
+		slog.Info("CACHE_INIT_SUCCESS: Backend cache initialized successfully", "enabled", true)
+	} else {
+		slog.Warn("CACHE_INIT_DISABLED: No cache available in model config", "enabled", false)
 	}
 
-	return &InputCache{
+	inputCache := &InputCache{
 		numCtx:         numCtx,
 		enabled:        cache != nil,
 		slots:          slots,
 		multiUserCache: multiUserCache,
 		cache:          cache,
-	}, nil
+	}
+
+	// TTFT_TIMING: Measure total KV cache creation duration
+	cacheCreateDuration := time.Since(cacheCreateStartTime)
+	slog.Info("CACHE_CREATE_COMPLETE: InputCache created", "numCtx", numCtx, "enabled", inputCache.enabled, "numSlots", len(slots), "cache_create_duration_ms", cacheCreateDuration.Milliseconds())
+	return inputCache, nil
 }
 
 func kvCacheTypeFromStr(s string) ml.DType {
@@ -70,7 +91,13 @@ func kvCacheTypeFromStr(s string) ml.DType {
 }
 
 func (c *InputCache) Close() {
-	c.cache.Close()
+	slog.Info("CACHE_CLOSE_START: Closing input cache", "enabled", c.enabled, "numCtx", c.numCtx)
+	if c.cache != nil {
+		c.cache.Close()
+		slog.Info("CACHE_CLOSE_COMPLETE: Input cache closed successfully")
+	} else {
+		slog.Info("CACHE_CLOSE_SKIPPED: No cache to close")
+	}
 }
 
 // Locking: Operations on InputCacheSlot (including finding one

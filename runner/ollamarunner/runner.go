@@ -837,11 +837,15 @@ func (s *Server) initModel(
 	kvSize int,
 	multiUserCache bool,
 ) error {
+	slog.Info("RUNNER_INIT_START: Initializing model", "model_path", mpath, "kv_size", kvSize, "parallel", parallel, "kv_cache_type", kvCacheType, "multi_user_cache", multiUserCache)
+
 	var err error
 	s.model, err = model.New(mpath, params)
 	if err != nil {
+		slog.Error("RUNNER_INIT_FAILED: Failed to create model", "model_path", mpath, "error", err)
 		return err
 	}
+	slog.Info("RUNNER_MODEL_CREATED: Model created successfully", "model_path", mpath)
 
 	// TODO(jessegross): LoRA loading
 	if lpath.String() != "" {
@@ -850,18 +854,21 @@ func (s *Server) initModel(
 
 	s.cache, err = NewInputCache(s.model, kvCacheType, int32(kvSize), parallel, s.batchSize, multiUserCache)
 	if err != nil {
+		slog.Error("RUNNER_CACHE_FAILED: Failed to create input cache", "model_path", mpath, "kv_size", kvSize, "error", err)
 		return err
 	}
+	slog.Info("RUNNER_CACHE_CREATED: Input cache created", "model_path", mpath, "kv_size", kvSize, "cache_enabled", s.cache.enabled)
 
 	if !s.cache.enabled && parallel > 1 {
 		parallel = 1
-		slog.Warn("model does not support caching, disabling parallel processing")
+		slog.Warn("RUNNER_PARALLEL_DISABLED: Model does not support caching, disabling parallel processing", "model_path", mpath)
 	}
 
 	s.parallel = parallel
 	s.seqs = make([]*Sequence, s.parallel)
 	s.seqsSem = semaphore.NewWeighted(int64(s.parallel))
 
+	slog.Info("RUNNER_INIT_COMPLETE: Model initialization complete", "model_path", mpath, "parallel", s.parallel, "batch_size", s.batchSize)
 	return s.reserveWorstCaseGraph()
 }
 
@@ -875,22 +882,31 @@ func (s *Server) load(
 	kvSize int,
 	multiUserCache bool,
 ) {
+	slog.Info("RUNNER_LOAD_START: Starting model loading", "model_path", mpath, "kv_size", kvSize, "parallel", parallel)
+
 	err := s.initModel(mpath, params, lpath, parallel, kvCacheType, kvSize, multiUserCache)
 	if err != nil {
+		slog.Error("RUNNER_LOAD_INIT_FAILED: Model initialization failed", "model_path", mpath, "error", err)
 		panic(err)
 	}
 
-	slog.Debug("memory", "allocated", s.model.Backend().BackendMemory())
+	slog.Info("RUNNER_MEMORY_ALLOCATED: Backend memory allocated", "model_path", mpath, "allocated", s.model.Backend().BackendMemory())
 
+	slog.Info("RUNNER_BACKEND_LOAD_START: Starting backend load", "model_path", mpath)
 	err = s.model.Backend().Load(ctx,
 		func(progress float32) {
 			s.progress = progress
+			if progress == 1.0 {
+				slog.Info("RUNNER_LOAD_PROGRESS: Model loading complete", "model_path", mpath, "progress", progress)
+			}
 		})
 	if err != nil {
+		slog.Error("RUNNER_BACKEND_LOAD_FAILED: Backend load failed", "model_path", mpath, "error", err)
 		panic(err)
 	}
 
 	s.status = llm.ServerStatusReady
+	slog.Info("RUNNER_LOAD_COMPLETE: Model loading complete and ready", "model_path", mpath, "status", s.status)
 	s.ready.Done()
 }
 

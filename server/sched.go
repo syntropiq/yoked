@@ -29,6 +29,7 @@ type LlmRequest struct {
 	model           *Model
 	opts            api.Options
 	origNumCtx      int // Track the initial ctx request
+	DynamicNumCtx   int // Dynamically calculated context size
 	sessionDuration *api.Duration
 	successCh       chan *runnerRef
 	errCh           chan error
@@ -81,7 +82,7 @@ func InitScheduler(ctx context.Context) *Scheduler {
 }
 
 // context must be canceled to decrement ref count and release the runner
-func (s *Scheduler) GetRunner(c context.Context, model *Model, opts api.Options, sessionDuration *api.Duration) (chan *runnerRef, chan error) {
+func (s *Scheduler) GetRunner(c context.Context, model *Model, opts api.Options, sessionDuration *api.Duration, dynamicNumCtx int) (chan *runnerRef, chan error) {
 	if opts.NumCtx < 4 {
 		opts.NumCtx = 4
 	}
@@ -90,6 +91,7 @@ func (s *Scheduler) GetRunner(c context.Context, model *Model, opts api.Options,
 		ctx:             c,
 		model:           model,
 		opts:            opts,
+		DynamicNumCtx:   dynamicNumCtx,
 		sessionDuration: sessionDuration,
 		successCh:       make(chan *runnerRef),
 		errCh:           make(chan error, 1),
@@ -330,17 +332,17 @@ func (s *Scheduler) processCompleted(ctx context.Context) {
 			runner.refMu.Lock()
 			runner.refCount--
 			if runner.refCount <= 0 {
-				if runner.sessionDuration <= 0 {
-					slog.Debug("runner with zero duration has gone idle, expiring to unload", "runner", runner)
-					if runner.expireTimer != nil {
-						runner.expireTimer.Stop()
-						runner.expireTimer = nil
-					}
-					s.expiredCh <- runner
-				} else if runner.expireTimer == nil {
-					slog.Debug("runner with non-zero duration has gone idle, adding timer", "runner", runner, "duration", runner.sessionDuration)
-					runner.expireTimer = time.AfterFunc(runner.sessionDuration, func() {
-						slog.Debug("timer expired, expiring to unload", "runner", runner)
+				// Per-request model unloading: Implement immediate unloading with short grace period
+				slog.Debug("request completed, scheduling per-request unload with grace period", "runner", runner)
+
+				// Check if there are any pending requests that could reuse this model instance
+				hasIdenticalPendingRequest := s.checkForIdenticalPendingRequest(runner, finished)
+
+				if hasIdenticalPendingRequest {
+					// Short grace period to avoid redundant reloads for identical requests
+					slog.Debug("identical request pending, setting short grace period", "runner", runner)
+					runner.expireTimer = time.AfterFunc(100*time.Millisecond, func() {
+						slog.Debug("grace period expired, expiring to unload", "runner", runner)
 						runner.refMu.Lock()
 						defer runner.refMu.Unlock()
 						if runner.expireTimer != nil {
@@ -349,20 +351,28 @@ func (s *Scheduler) processCompleted(ctx context.Context) {
 						}
 						s.expiredCh <- runner
 					})
-					runner.expiresAt = time.Now().Add(runner.sessionDuration)
+					runner.expiresAt = time.Now().Add(100 * time.Millisecond)
 				} else {
-					slog.Debug("runner with non-zero duration has gone idle, resetting timer", "runner", runner, "duration", runner.sessionDuration)
-					runner.expireTimer.Reset(runner.sessionDuration)
-					runner.expiresAt = time.Now().Add(runner.sessionDuration)
+					// No identical request pending, unload immediately
+					slog.Debug("no identical request pending, unloading immediately", "runner", runner)
+					if runner.expireTimer != nil {
+						runner.expireTimer.Stop()
+						runner.expireTimer = nil
+					}
+					s.expiredCh <- runner
 				}
 			}
 			slog.Debug("after processing request finished event", "runner", runner, "refCount", runner.refCount)
 			runner.refMu.Unlock()
 		case runner := <-s.expiredCh:
-			slog.Debug("runner expired event received", "runner", runner)
+			modelPath := "unknown"
+			if runner != nil {
+				modelPath = runner.modelPath
+			}
+			slog.Info("MODEL_EXPIRED_EVENT: Runner expired event received", "model", modelPath, "runner", runner)
 			runner.refMu.Lock()
 			if runner.refCount > 0 {
-				slog.Debug("expired event with positive ref count, retrying", "runner", runner, "refCount", runner.refCount)
+				slog.Info("MODEL_EXPIRED_RETRY: Expired event with positive ref count, retrying", "model", modelPath, "runner", runner, "refCount", runner.refCount)
 				go func(runner *runnerRef) {
 					// We can't unload yet, but want to as soon as the current request completes
 					// So queue up another expired event
@@ -374,7 +384,7 @@ func (s *Scheduler) processCompleted(ctx context.Context) {
 			}
 
 			s.loadedMu.Lock()
-			slog.Debug("got lock to unload expired event", "runner", runner)
+			slog.Info("MODEL_UNLOAD_LOCK: Got lock to unload expired event", "model", modelPath, "runner", runner)
 			runnerToUnload := s.loaded[runner.modelPath]
 			if runnerToUnload == nil {
 				// If runnerToUnload is nil, we already processed an event and
@@ -384,7 +394,7 @@ func (s *Scheduler) processCompleted(ctx context.Context) {
 				// and require a reload
 				s.loadedMu.Unlock()
 				runner.refMu.Unlock()
-				slog.Debug("duplicate expired event, ignoring", "runner", runner)
+				slog.Info("MODEL_EXPIRED_DUPLICATE: Duplicate expired event, ignoring", "model", modelPath, "runner", runner)
 			} else if runner.pid != runnerToUnload.pid {
 				// If the pids do not match, we likely had multiple load
 				// failures for the same model in quick succession due to
@@ -392,24 +402,47 @@ func (s *Scheduler) processCompleted(ctx context.Context) {
 				// events. Ensure the orphaned runner is properly shut down, but
 				// do not delete the mismatched loaded runner, or wait for VRAM
 				// convergence.
-				slog.Debug("orphaned runner shutting down", "orphan", runner, "loaded", runnerToUnload)
+				slog.Info("MODEL_ORPHANED_SHUTDOWN: Orphaned runner shutting down", "model", modelPath, "orphan", runner, "loaded", runnerToUnload)
 				runner.unload()
 				s.loadedMu.Unlock()
 				runner.refMu.Unlock()
 			} else {
-				slog.Debug("starting background wait for VRAM recovery", "runner", runner)
+				slog.Info("MODEL_VRAM_RECOVERY_START: Starting background wait for VRAM recovery", "model", modelPath, "runner", runner)
 				finished := runner.waitForVRAMRecovery()
+				slog.Info("MODEL_UNLOAD_INITIATE: Initiating runner unload", "model", modelPath, "runner", runner)
 				runner.unload()
 				delete(s.loaded, runner.modelPath)
+				slog.Info("MODEL_REMOVED_FROM_LOADED: Runner terminated and removed from loaded list", "model", modelPath, "runner", runner, "remaining_count", len(s.loaded))
 				s.loadedMu.Unlock()
-				slog.Debug("runner terminated and removed from list, blocking for VRAM recovery", "runner", runner)
+				slog.Info("MODEL_VRAM_RECOVERY_WAIT: Blocking for VRAM recovery completion", "model", modelPath, "runner", runner)
 				<-finished
 				runner.refMu.Unlock()
-				slog.Debug("sending an unloaded event", "runner", runner)
+				slog.Info("MODEL_UNLOADED_EVENT: Sending unloaded event", "model", modelPath, "runner", runner)
 				s.unloadedCh <- struct{}{}
 			}
 		}
 	}
+}
+
+// checkForIdenticalPendingRequest checks if there are any pending requests that would
+// use the same model configuration as the completed request, to avoid unnecessary unloading
+func (s *Scheduler) checkForIdenticalPendingRequest(runner *runnerRef, finished *LlmRequest) bool {
+	// Check if there are pending requests in the channel that would match this runner
+	// This is a best-effort check - we can't peek into the channel without draining it,
+	// so we use a conservative approach based on the current implementation
+
+	// For now, we'll use a simple heuristic: if the session duration is > 0,
+	// there might be related requests coming, so we provide a grace period
+	// Otherwise, we unload immediately to free resources
+
+	// In the future, this could be enhanced to actually check pending requests
+	// by maintaining a separate data structure for pending requests
+
+	slog.Debug("checking for identical pending requests", "sessionDuration", runner.sessionDuration, "modelPath", runner.modelPath)
+
+	// Conservative approach: provide grace period if session duration suggests
+	// the model might be reused soon
+	return runner.sessionDuration > 0
 }
 
 // Complete the pending request and send the runner back to the requester
@@ -442,7 +475,17 @@ func (s *Scheduler) load(req *LlmRequest, f *ggml.GGML, gpus discover.GpuInfoLis
 	if req.sessionDuration != nil {
 		sessionDuration = req.sessionDuration.Duration
 	}
+	// Set NumCtx to the dynamically calculated value for the model loading
+	req.opts.NumCtx = req.DynamicNumCtx
+
+	// TTFT_TIMING: Start precise timing measurement for model loading
+	loadStartTime := time.Now()
+	slog.Info("MODEL_LOAD_START: Initiating model loading", "model", req.model.ModelPath, "dynamic_num_ctx", req.DynamicNumCtx, "num_parallel", numParallel, "load_start_time", loadStartTime.Format(time.RFC3339Nano))
+
 	llama, err := s.newServerFn(gpus, req.model.ModelPath, f, req.model.AdapterPaths, req.model.ProjectorPaths, req.opts, numParallel)
+
+	// TTFT_TIMING: Measure model loading duration
+	loadDuration := time.Since(loadStartTime)
 	if err != nil {
 		// some older models are not compatible with newer versions of llama.cpp
 		// show a generalized compatibility error until there is a better way to
@@ -450,10 +493,11 @@ func (s *Scheduler) load(req *LlmRequest, f *ggml.GGML, gpus discover.GpuInfoLis
 		if errors.Is(err, ggml.ErrUnsupportedFormat) || strings.Contains(err.Error(), "failed to load model") {
 			err = fmt.Errorf("%v: this model may be incompatible with your version of Ollama. If you previously pulled this model, try updating it by running `ollama pull %s`", err, req.model.ShortName)
 		}
-		slog.Info("NewLlamaServer failed", "model", req.model.ModelPath, "error", err)
+		slog.Error("MODEL_LOAD_FAILED: NewLlamaServer failed", "model", req.model.ModelPath, "error", err, "dynamic_num_ctx", req.DynamicNumCtx, "load_duration_ms", loadDuration.Milliseconds())
 		req.errCh <- err
 		return
 	}
+	slog.Info("MODEL_LOAD_SUCCESS: LlamaServer created", "model", req.model.ModelPath, "pid", llama.Pid(), "estimated_vram", llama.EstimatedVRAM(), "estimated_total", llama.EstimatedTotal(), "load_duration_ms", loadDuration.Milliseconds())
 	runner := &runnerRef{
 		model:           req.model,
 		modelPath:       req.model.ModelPath,
@@ -465,6 +509,7 @@ func (s *Scheduler) load(req *LlmRequest, f *ggml.GGML, gpus discover.GpuInfoLis
 		estimatedTotal:  llama.EstimatedTotal(),
 		loading:         true,
 		pid:             llama.Pid(),
+		LoadedNumCtx:    req.DynamicNumCtx,
 	}
 	runner.numParallel = numParallel
 	runner.refMu.Lock() // hold lock until running or aborted
@@ -491,12 +536,13 @@ func (s *Scheduler) load(req *LlmRequest, f *ggml.GGML, gpus discover.GpuInfoLis
 			s.expiredCh <- runner
 			return
 		}
-		slog.Debug("finished setting up", "runner", runner)
+		slog.Info("MODEL_READY: Model setup complete", "model", req.model.ModelPath, "runner", runner, "pid", llama.Pid(), "loaded_num_ctx", runner.LoadedNumCtx)
 		if runner.pid < 0 {
 			runner.pid = llama.Pid()
 		}
 		runner.refCount++
 		runner.loading = false
+		slog.Info("MODEL_REF_INCREMENT: Reference count increased", "model", req.model.ModelPath, "ref_count", runner.refCount)
 		go func() {
 			<-req.ctx.Done()
 			slog.Debug("context for request finished", "model", req.model.ModelPath)
@@ -590,25 +636,40 @@ type runnerRef struct {
 	expireTimer     *time.Timer
 	expiresAt       time.Time
 
-	model       *Model
-	modelPath   string
-	numParallel int
+	model        *Model
+	modelPath    string
+	numParallel  int
+	LoadedNumCtx int // KV cache size of the loaded runner instance
 	*api.Options
 }
 
 // The refMu must already be held when calling unload
 func (runner *runnerRef) unload() {
+	modelPath := "unknown"
+	if runner.model != nil {
+		modelPath = runner.model.ModelPath
+	}
+	slog.Info("MODEL_UNLOAD_START: Beginning model unload", "model", modelPath, "runner", runner)
+
 	if runner.expireTimer != nil {
+		slog.Debug("MODEL_UNLOAD: Stopping expire timer", "model", modelPath)
 		runner.expireTimer.Stop()
 		runner.expireTimer = nil
 	}
 	if runner.llama != nil {
-		runner.llama.Close()
+		slog.Info("MODEL_UNLOAD: Closing LlamaServer", "model", modelPath, "pid", runner.pid)
+		err := runner.llama.Close()
+		if err != nil {
+			slog.Error("MODEL_UNLOAD_ERROR: Failed to close LlamaServer", "model", modelPath, "error", err, "pid", runner.pid)
+		} else {
+			slog.Info("MODEL_UNLOAD_SUCCESS: LlamaServer closed successfully", "model", modelPath, "pid", runner.pid)
+		}
 	}
 	runner.model = nil
 	runner.llama = nil
 	runner.Options = nil
 	runner.gpus = nil
+	slog.Info("MODEL_UNLOAD_COMPLETE: Model unload finished", "model", modelPath)
 }
 
 func (runner *runnerRef) needsReload(ctx context.Context, req *LlmRequest) bool {
@@ -642,6 +703,7 @@ func (runner *runnerRef) needsReload(ctx context.Context, req *LlmRequest) bool 
 	if !reflect.DeepEqual(runner.model.AdapterPaths, req.model.AdapterPaths) || // have the adapters changed?
 		!reflect.DeepEqual(runner.model.ProjectorPaths, req.model.ProjectorPaths) || // have the projectors changed?
 		!reflect.DeepEqual(optsExisting, optsNew) || // have the runner options changed?
+		runner.LoadedNumCtx != req.DynamicNumCtx || // does the KV cache size match the dynamic NumCtx?
 		runner.llama.Ping(ctx) != nil {
 		return true
 	}
