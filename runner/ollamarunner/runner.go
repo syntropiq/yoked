@@ -631,7 +631,7 @@ func (s *Server) completion(w http.ResponseWriter, r *http.Request) {
 	seq, err := s.NewSequence(req.Prompt, req.Images, NewSequenceParams{
 		numPredict: req.Options.NumPredict,
 		stop:       req.Options.Stop,
-		numKeep:    int32(req.Options.NumKeep),
+		numKeep:    s.cache.numCtx,
 		sampler:    sampler,
 		embedding:  false,
 	})

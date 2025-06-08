@@ -1083,7 +1083,17 @@ func chat(cmd *cobra.Command, opts runOptions) (*api.Message, error) {
 	var thinkTagOpened bool = false
 	var thinkTagClosed bool = false
 
+	// Time to First Token measurement
+	var requestStartTime time.Time
+	var firstTokenTime *time.Time
+
 	fn := func(response api.ChatResponse) error {
+		// Record time of first token
+		if firstTokenTime == nil && (response.Message.Content != "" || response.Message.Thinking != "") {
+			now := time.Now()
+			firstTokenTime = &now
+		}
+
 		if response.Message.Content != "" || !opts.HideThinking {
 			p.StopAndClear()
 		}
@@ -1131,6 +1141,9 @@ func chat(cmd *cobra.Command, opts runOptions) (*api.Message, error) {
 		req.KeepAlive = opts.KeepAlive
 	}
 
+	// Record request start time
+	requestStartTime = time.Now()
+
 	if err := client.Chat(cancelCtx, req, fn); err != nil {
 		if errors.Is(err, context.Canceled) {
 			return nil, nil
@@ -1150,6 +1163,11 @@ func chat(cmd *cobra.Command, opts runOptions) (*api.Message, error) {
 
 	if verbose {
 		latest.Summary()
+		// Display Time to First Token if available
+		if firstTokenTime != nil {
+			timeToFirstToken := firstTokenTime.Sub(requestStartTime)
+			fmt.Fprintf(os.Stderr, "\nTime to first token: %v\n", timeToFirstToken)
+		}
 	}
 
 	return &api.Message{Role: role, Content: fullResponse.String()}, nil
@@ -1191,9 +1209,19 @@ func generate(cmd *cobra.Command, opts runOptions) error {
 
 	plainText := !term.IsTerminal(int(os.Stdout.Fd()))
 
+	// Time to First Token measurement
+	var requestStartTime time.Time
+	var firstTokenTime *time.Time
+
 	fn := func(response api.GenerateResponse) error {
 		latest = response
 		content := response.Response
+
+		// Record time of first token
+		if firstTokenTime == nil && (response.Response != "" || response.Thinking != "") {
+			now := time.Now()
+			firstTokenTime = &now
+		}
 
 		if response.Response != "" || !opts.HideThinking {
 			p.StopAndClear()
@@ -1240,6 +1268,9 @@ func generate(cmd *cobra.Command, opts runOptions) error {
 		Think:     opts.Think,
 	}
 
+	// Record request start time
+	requestStartTime = time.Now()
+
 	if err := client.Generate(ctx, &request, fn); err != nil {
 		if errors.Is(err, context.Canceled) {
 			return nil
@@ -1263,6 +1294,11 @@ func generate(cmd *cobra.Command, opts runOptions) error {
 
 	if verbose {
 		latest.Summary()
+		// Display Time to First Token if available
+		if firstTokenTime != nil {
+			timeToFirstToken := firstTokenTime.Sub(requestStartTime)
+			fmt.Fprintf(os.Stderr, "\nTime to first token: %v\n", timeToFirstToken)
+		}
 	}
 
 	ctx = context.WithValue(cmd.Context(), generateContextKey("context"), latest.Context)

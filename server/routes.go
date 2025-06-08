@@ -178,7 +178,16 @@ func (s *Server) calculateAndSetDynamicNumCtx(ctx context.Context, name string, 
 			}
 		}
 	}
-	slog.Debug("NumCtx override", "original", originalNumCtx, "dynamic", dynamicNumCtx, "model", name)
+
+	// Enhanced logging for performance diagnosis
+	slog.Info("Dynamic NumCtx calculation completed",
+		"requestID", ctx.Value("requestID"),
+		"model", name,
+		"messageLength", messageLength,
+		"maxResponseTokens", maxResponseTokens,
+		"modelMaxCtx", modelMaxCtx,
+		"originalNumCtx", originalNumCtx,
+		"dynamicNumCtx", dynamicNumCtx)
 
 	// Override the NumCtx in request options
 	updatedOpts := make(map[string]any)

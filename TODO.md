@@ -28,14 +28,16 @@
 
 ### Remaining Debug Mode Subtasks for Regression Investigation
 
-- [ ] **New Performance Diagnosis Plan: "Time to First Token" Degradation (June 7, 2025)**
-    - [ ] **Subtask 3.1: Client-side "Time to First Token" Stopwatch**
+- [x] **New Performance Diagnosis Plan: "Time to First Token" Degradation (June 7, 2025)**
+    - [x] **Subtask 3.1: Client-side "Time to First Token" Stopwatch**
         - **Goal:** Measure and display "time to first token" in client's `--verbose` output.
         - **Mode:** Code
+        - **Status:** ✅ COMPLETED - Added timing measurement to both `generate` and `chat` functions in [`cmd/cmd.go`](cmd/cmd.go). Implemented stopwatch that starts when request is sent and stops when first token is received. Displays duration in `--verbose` output as "Time to first token: Xms".
         - **Instructions:** Identify relevant client-side verbose output location (e.g., `cmd` or `app` directories). Implement a stopwatch that starts when the request is sent and stops when the first token is received. Display this duration in the `--verbose` output.
-    - [ ] **Subtask 3.2: Server-side Context Size and Truncation Logging**
+    - [x] **Subtask 3.2: Server-side Context Size and Truncation Logging**
         - **Goal:** Log `num_ctx` per message and truncation warnings in server logs.
         - **Mode:** Code
+        - **Status:** ✅ COMPLETED - Enhanced `calculateAndSetDynamicNumCtx` in [`server/routes.go`](server/routes.go) with detailed logging including request ID, model name, message length, and dynamic NumCtx calculation. Added comprehensive truncation logging to `chatPrompt` in [`server/prompt.go`](server/prompt.go) with before/after truncation details.
         - **Instructions:** Enhance `calculateAndSetDynamicNumCtx` in [`server/routes.go`](server/routes.go) to log `dynamicNumCtx` after calculation, including request ID and model name. Identify prompt truncation logic (likely `server/prompt.go`). Add log entries *before* truncation (original message length, `NumCtx` limit) and *after* truncation (final truncated length, amount lopped off).
     - [ ] **Subtask 3.3: Verification of New Logging**
         - **Goal:** Confirm new logging is accurate and provides expected diagnostic information.
@@ -88,3 +90,12 @@
     - [x] **Subtask 3.3: Update `TODO.md`**
             - **Goal:** Mark completed subtasks and update the list of remaining tasks.
             - **Mode:** Architect
+
+## Cache Optimization Implementation (June 7, 2025)
+
+- [x] **Fix Premature Context Eviction in Cache Shifting**
+    - **Problem:** `ShiftCacheSlot` was using `numKeep=0` by default, causing aggressive truncation of context even when dynamic `numCtx` had sufficient space
+    - **Root Cause:** `numKeep` was set to `req.Options.NumKeep` (defaults to 0) instead of aligning with dynamic context sizing
+    - **Solution:** Modified [`runner/ollamarunner/runner.go:634`](runner/ollamarunner/runner.go:634) to set `numKeep: s.cache.numCtx` instead of `int32(req.Options.NumKeep)`
+    - **Effect:** Cache shifting now preserves the full dynamic context window, preventing premature eviction of relevant context
+    - **Status:** ✅ COMPLETED - Change implemented and ready for testing

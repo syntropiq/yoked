@@ -10,6 +10,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"slices"
 	"strings"
 
@@ -53,7 +54,7 @@ func messagesEqual(m1, m2 api.Message) bool {
 // reverse search algorithm. It starts from the most recent message and works backward, finding the
 // largest contiguous set of messages that fit within the context window. This ensures:
 // 1. The latest user message is ALWAYS included (critical for response relevance)
-// 2. All system messages are ALWAYS included (critical for model behavior)  
+// 2. All system messages are ALWAYS included (critical for model behavior)
 // 3. Maximum conversation history is preserved within context limits
 // 4. No "gaps" in conversation history (maintains coherent context flow)
 //
@@ -108,7 +109,7 @@ func chatPrompt(ctx context.Context, m *Model, tokenize tokenizeFunc, opts *api.
 
 	// STEP 1: MESSAGE CATEGORIZATION
 	// Separate system messages (S_all) from conversation messages for different handling
-	var systemMessages []api.Message     // S_all: System messages (always preserved)
+	var systemMessages []api.Message       // S_all: System messages (always preserved)
 	var conversationMessages []api.Message // Non-system messages for selective truncation
 	for _, msg := range msgs {
 		if msg.Role == "system" {
@@ -124,7 +125,7 @@ func chatPrompt(ctx context.Context, m *Model, tokenize tokenizeFunc, opts *api.
 	if len(conversationMessages) > 0 {
 		M1 = &conversationMessages[0]
 	}
-	
+
 	// M_latest: Most recent message (critical for response relevance)
 	var M_latest *api.Message
 	if len(msgs) > 0 {
@@ -225,6 +226,14 @@ func chatPrompt(ctx context.Context, m *Model, tokenize tokenizeFunc, opts *api.
 		if err != nil {
 			return "", nil, err
 		}
+
+		// Log context size before truncation check
+		slog.Info("Context size check before truncation",
+			"originalMessageCount", len(msgs),
+			"totalTokens", tokCount,
+			"numCtxLimit", opts.NumCtx,
+			"exceedsLimit", tokCount > opts.NumCtx)
+
 		// If this exceeds context limit, check if we have room for M1 + skip + M_latest
 		if tokCount > opts.NumCtx {
 			// Test if S_all + M1 + M_skip + M_latest fits
@@ -241,6 +250,16 @@ func chatPrompt(ctx context.Context, m *Model, tokenize tokenizeFunc, opts *api.
 			// Only use skip if the basic structure fits
 			if skipTokCount <= opts.NumCtx {
 				needsSkip = true
+				// Log truncation decision
+				slog.Info("Truncation required - M_skip will be inserted",
+					"basicStructureTokens", skipTokCount,
+					"numCtxLimit", opts.NumCtx,
+					"intermediateMessageCount", len(intermediateMessages))
+			} else {
+				slog.Warn("Context limit exceeded even with basic structure",
+					"basicStructureTokens", skipTokCount,
+					"numCtxLimit", opts.NumCtx,
+					"cannotFitBasicStructure", true)
 			}
 		}
 	}
@@ -262,31 +281,50 @@ func chatPrompt(ctx context.Context, m *Model, tokenize tokenizeFunc, opts *api.
 		for i := len(intermediateMessages) - 1; i >= 0; i-- {
 			// candidate represents intermediateMessages[i:] (suffix from position i)
 			candidate := intermediateMessages[i:]
-			
+
 			// Construct test prompt: S_all + M1 + M_skip + candidate + M_latest
 			tempMsgs := append([]api.Message{}, finalMessages...)
 			tempMsgs = append(tempMsgs, candidate...)
 			if M_latest != nil && (M1 == nil || !messagesEqual(*M1, *M_latest)) {
 				tempMsgs = append(tempMsgs, *M_latest)
 			}
-			
+
 			// Test if this selection fits within context limits
 			tokCount, err := countTokens(tempMsgs)
 			if err != nil {
 				return "", nil, err
 			}
-			
+
 			// If it fits, this is our optimal selection (largest suffix that fits)
 			if tokCount <= opts.NumCtx {
 				bestIntermediateSelection = candidate
+				selectedIntermediateCount := len(candidate)
+				totalIntermediateCount := len(intermediateMessages)
+				truncatedCount := totalIntermediateCount - selectedIntermediateCount
+
+				// Log successful reverse selection
+				slog.Info("Reverse truncation completed",
+					"finalTokens", tokCount,
+					"numCtxLimit", opts.NumCtx,
+					"selectedIntermediateMessages", selectedIntermediateCount,
+					"totalIntermediateMessages", totalIntermediateCount,
+					"truncatedMessages", truncatedCount)
 				break
 			}
 		}
 		// Note: If no suffix fits, bestIntermediateSelection remains empty
 		// This means only S_all + M1 + M_skip + M_latest will be included
+		if len(bestIntermediateSelection) == 0 {
+			slog.Warn("Extreme truncation - no intermediate messages fit",
+				"totalIntermediateMessages", len(intermediateMessages),
+				"onlyBasicStructureIncluded", true)
+		}
 	} else {
 		// No truncation needed - include all intermediate messages
 		bestIntermediateSelection = intermediateMessages
+		slog.Info("No truncation required",
+			"totalMessages", len(msgs),
+			"allMessagesIncluded", true)
 	}
 
 	// STEP 11: FINALIZE MESSAGE ASSEMBLY
@@ -306,10 +344,10 @@ func chatPrompt(ctx context.Context, m *Model, tokenize tokenizeFunc, opts *api.
 		if slices.Contains(m.Config.ModelFamilies, "mllama") && len(msg.Images) > 1 {
 			return "", nil, errors.New("this model only supports one image while more than one image requested")
 		}
-		
+
 		var prefix string
 		prompt := msg.Content
-		
+
 		// Convert each image to a unique tagged reference
 		for _, i := range msg.Images {
 			imgData := llm.ImageData{
@@ -317,7 +355,7 @@ func chatPrompt(ctx context.Context, m *Model, tokenize tokenizeFunc, opts *api.
 				Data: i,
 			}
 			imgTag := fmt.Sprintf("[img-%d]", imgData.ID)
-			
+
 			// Handle image placement: either replace [img] placeholder or prepend to content
 			if !strings.Contains(prompt, "[img]") {
 				prefix += imgTag
@@ -337,7 +375,7 @@ func chatPrompt(ctx context.Context, m *Model, tokenize tokenizeFunc, opts *api.
 	if think != nil {
 		thinkVal = *think
 	}
-	
+
 	// Execute template with final message set, tools, and thinking mode configuration
 	if err := m.Template.Execute(&b, template.Values{Messages: finalMessages, Tools: tools, Think: thinkVal, IsThinkSet: think != nil}); err != nil {
 		return "", nil, err
