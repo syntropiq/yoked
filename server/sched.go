@@ -610,7 +610,7 @@ func (s *Scheduler) filterGPUsWithoutLoadingModels(allGpus discover.GpuInfoList)
 			for _, busyGPU := range runner.gpus {
 				for i := range ret {
 					if ret[i].ID == busyGPU.ID {
-						ret = append(ret[:i], ret[i+1:]...)
+						ret = slices.Delete(ret, i, i+1)
 						break
 					}
 				}

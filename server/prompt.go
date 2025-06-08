@@ -381,5 +381,46 @@ func chatPrompt(ctx context.Context, m *Model, tokenize tokenizeFunc, opts *api.
 		return "", nil, err
 	}
 
+	// FINAL POST-TRUNCATION SUMMARY LOGGING
+	// Calculate final token count for comprehensive truncation diagnosis
+	finalTokenCount, err := countTokens(finalMessages)
+	if err != nil {
+		slog.Warn("Failed to count final tokens for post-truncation logging", "error", err)
+		finalTokenCount = -1 // Indicate counting failure
+	}
+
+	// Calculate original token count for comparison
+	originalTokenCount, err := countTokens(msgs)
+	if err != nil {
+		slog.Warn("Failed to count original tokens for post-truncation logging", "error", err)
+		originalTokenCount = -1 // Indicate counting failure
+	}
+
+	// Calculate tokens removed (if both counts are valid)
+	var tokensRemoved int
+	if originalTokenCount >= 0 && finalTokenCount >= 0 {
+		tokensRemoved = originalTokenCount - finalTokenCount
+	} else {
+		tokensRemoved = -1 // Indicate calculation failure
+	}
+
+	// Comprehensive post-truncation logging for TTFT diagnosis
+	slog.Info("Post-truncation summary completed",
+		"requestID", ctx.Value("requestID"),
+		"originalMessageCount", len(msgs),
+		"finalMessageCount", len(finalMessages),
+		"messagesRemoved", len(msgs)-len(finalMessages),
+		"originalTokenCount", originalTokenCount,
+		"finalTokenCount", finalTokenCount,
+		"tokensRemoved", tokensRemoved,
+		"numCtxLimit", opts.NumCtx,
+		"truncationOccurred", len(msgs) != len(finalMessages),
+		"contextUtilization", func() float64 {
+			if opts.NumCtx > 0 && finalTokenCount >= 0 {
+				return float64(finalTokenCount) / float64(opts.NumCtx) * 100
+			}
+			return -1
+		}())
+
 	return b.String(), images, nil
 }

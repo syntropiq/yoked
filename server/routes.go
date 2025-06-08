@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"cmp"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -43,6 +45,16 @@ import (
 	"github.com/ollama/ollama/types/model"
 	"github.com/ollama/ollama/version"
 )
+
+// generateRequestID creates a unique request identifier for logging correlation
+func generateRequestID() string {
+	randBytes := make([]byte, 8)
+	if _, err := rand.Read(randBytes); err != nil {
+		// Fallback to timestamp-based ID if random generation fails
+		return fmt.Sprintf("req_%d", time.Now().UnixNano())
+	}
+	return "req_" + hex.EncodeToString(randBytes)
+}
 
 func experimentEnabled(name string) bool {
 	return slices.Contains(strings.Split(os.Getenv("OLLAMA_EXPERIMENT"), ","), name)
@@ -238,6 +250,14 @@ func (s *Server) scheduleRunner(ctx context.Context, name string, caps []model.C
 
 func (s *Server) GenerateHandler(c *gin.Context) {
 	checkpointStart := time.Now()
+
+	// Generate unique request ID for logging correlation
+	requestID := generateRequestID()
+	ctx := context.WithValue(c.Request.Context(), "requestID", requestID)
+	c.Request = c.Request.WithContext(ctx)
+
+	slog.Info("GenerateHandler: Request started", "requestID", requestID)
+
 	var req api.GenerateRequest
 	if err := c.ShouldBindJSON(&req); errors.Is(err, io.EOF) {
 		slog.Error("GenerateHandler: missing request body")
@@ -1684,7 +1704,12 @@ func (s *Server) PsHandler(c *gin.Context) {
 }
 
 func (s *Server) ChatHandler(c *gin.Context) {
-	slog.Info("ChatHandler: Function called")
+	// Generate unique request ID for logging correlation
+	requestID := generateRequestID()
+	ctx := context.WithValue(c.Request.Context(), "requestID", requestID)
+	c.Request = c.Request.WithContext(ctx)
+
+	slog.Info("ChatHandler: Function called", "requestID", requestID)
 	defer func() {
 		if r := recover(); r != nil {
 			slog.Error("ChatHandler: Panic occurred", "panic", r)

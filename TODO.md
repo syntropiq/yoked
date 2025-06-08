@@ -47,6 +47,45 @@
         - **Goal:** Document the findings and resolution of the "time to first token" issue.
         - **Mode:** Architect
         - **Instructions:** Update `ISSUE.md` with the diagnosis and resolution. Update `PLAN.md` with the completed subtasks. Update `TODO.md` to mark these new tasks as completed.
+- [x] **New Task: Enhance Logging for TTFT Degradation Diagnosis**
+    - **Objective:** Implement comprehensive logging for context truncation and ensure proper request ID correlation across client and server logs to facilitate accurate diagnosis of "Time to First Token" degradation.
+    - **Phase 1: Enhance Server-Side Truncation Logging**
+        - [x] **Subtask 1.1: Add Post-Truncation Logging in `server/prompt.go`**
+            - **Goal:** After the `chatPrompt` function performs any truncation, log the outcome.
+            - **Mode:** Code
+            - **Status:** ✅ COMPLETED - Added comprehensive post-truncation summary logging with original/final token counts, messages removed, context utilization percentage, and request ID correlation.
+    - **Phase 2: Implement Request ID Population**
+        - [x] **Subtask 2.1: Generate Unique Request ID in `server/routes.go`**
+            - **Goal:** Create a unique identifier for each incoming API request.
+            - **Mode:** Code
+            - **Status:** ✅ COMPLETED - Added `generateRequestID()` function using crypto/rand with fallback to timestamp-based IDs.
+        - [x] **Subtask 2.2: Propagate Request ID in Context**
+            - **Goal:** Attach the generated `requestID` to the request's `context.Context`.
+            - **Mode:** Code
+            - **Status:** ✅ COMPLETED - Request IDs are now generated and propagated through context in both GenerateHandler and ChatHandler.
+        - [ ] **Subtask 2.3: Update Client to Log Request ID (if applicable)**
+            - **Goal:** If the client sends a `requestID`, ensure it's logged. (Currently, the client doesn't send one, but this is a forward-looking consideration).
+            - **Mode:** Code
+    - **Phase 3: Verification and Testing**
+        - [ ] **Subtask 3.1: Run User Acceptance Test Scenario**
+            - **Goal:** Reproduce "time to first token" degradation and involve context growth/truncation.
+            - **Mode:** Debug
+        - [ ] **Subtask 3.2: Review Client-side `--verbose` Output**
+            - **Goal:** Confirm TTFT logging is present and accurate.
+            - **Mode:** Debug
+        - [ ] **Subtask 3.3: Review Server Logs**
+            - **Goal:** Confirm the new truncation and request ID logs are present, accurate, and correlatable.
+            - **Mode:** Debug
+    - **Phase 4: Documentation Updates**
+        - [ ] **Subtask 4.1: Update `ISSUE.md`**
+            - **Goal:** Document the problem diagnosis, root cause, and resolution for the logging issues.
+            - **Mode:** Architect
+        - [ ] **Subtask 4.2: Update `PLAN.md`**
+            - **Goal:** Detail the implementation steps, subtasks, and current status of these logging enhancements.
+            - **Mode:** Architect
+        - [ ] **Subtask 4.3: Update `TODO.md`**
+            - **Goal:** Mark these new tasks as completed.
+            - **Mode:** Architect
 
 - [x] **Phase 1: Address `TestGenerateChat` Failures (Critical Design Inconsistency)**
     - [x] **Subtask 1.1: Unify `NumCtx` Handling for `ChatHandler`**

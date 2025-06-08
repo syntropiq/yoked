@@ -229,3 +229,97 @@ Implement a system where the KV cache size of the loaded model instance precisel
 *   **Performance Monitoring:** Close monitoring of "time to first token" and overall throughput will be essential during and after implementation.
 *   **Error Handling:** Ensure robust error handling for model loading/unloading failures.
 *   **Concurrency:** Pay close attention to locking mechanisms in the scheduler to prevent race conditions during model management.
+
+---
+
+# Plan: Enhance Logging for TTFT Degradation Diagnosis
+
+## Objective:
+Implement comprehensive logging for context truncation and ensure proper request ID correlation across client and server logs to facilitate accurate diagnosis of "Time to First Token" degradation.
+
+## Phases and Subtasks:
+
+### Phase 1: Enhance Server-Side Truncation Logging
+
+*   **Objective**: Provide detailed insights into context truncation events, including the amount of data removed.
+*   **Subtasks**:
+    *   **Subtask 1.1: Add Post-Truncation Logging in `server/prompt.go`**
+        *   **Goal**: After the `chatPrompt` function performs any truncation, log the outcome.
+        *   **Location**: [`server/prompt.go`](server/prompt.go) (within the `chatPrompt` function, after the reverse filling strategy is applied).
+        *   **Action**: Introduce `slog.Info` or `slog.Debug` statements that capture:
+            *   The final token count of the messages after truncation.
+            *   The original token count before truncation.
+            *   The number of tokens "lopped off" (original - final).
+            *   The number of messages remaining after truncation.
+            *   The `requestID` for correlation.
+        *   **Mode**: Code
+
+### Phase 2: Implement Request ID Population
+
+*   **Objective**: Ensure a unique `requestID` is generated and propagated through the request context, allowing for end-to-end log correlation.
+*   **Subtasks**:
+    *   **Subtask 2.1: Generate Unique Request ID in `server/routes.go`**
+        *   **Goal**: Create a unique identifier for each incoming API request.
+        *   **Location**: [`server/routes.go`](server/routes.go) (at the beginning of `GenerateHandler` and `ChatHandler`).
+        *   **Action**: Generate a UUID or a similar unique string for each request.
+        *   **Mode**: Code
+    *   **Subtask 2.2: Propagate Request ID in Context**
+        *   **Goal**: Attach the generated `requestID` to the request's `context.Context`.
+        *   **Location**: [`server/routes.go`](server/routes.go) (within `GenerateHandler` and `ChatHandler`).
+        *   **Action**: Use `context.WithValue` to add the `requestID` to the `c.Request.Context()` before passing it down to subsequent functions (e.g., `calculateAndSetDynamicNumCtx`, `chatPrompt`).
+        *   **Mode**: Code
+    *   **Subtask 2.3: Update Client to Log Request ID (if applicable)**
+        *   **Goal**: If the client sends a `requestID`, ensure it's logged. (Currently, the client doesn't send one, but this is a forward-looking consideration).
+        *   **Location**: [`cmd/cmd.go`](cmd/cmd.go) (within `generate` and `chat` functions).
+        *   **Action**: (No immediate code change, but a note for future client-side enhancements to include `requestID` in API requests and log it with TTFT).
+        *   **Mode**: Code
+
+### Phase 3: Verification and Testing
+
+*   **Objective**: Confirm that the new logging is accurate and provides the expected diagnostic information.
+*   **Subtasks**:
+    *   **Subtask 3.1: Run User Acceptance Test Scenario**
+        *   **Goal**: Reproduce "time to first token" degradation and involve context growth/truncation.
+        *   **Action**: Utilize the existing [`scripts/assess_ttft_penalty.sh`](scripts/assess_ttft_penalty.sh) script. This script already includes scenarios with varying prompt lengths that should trigger dynamic sizing and potential truncation.
+        *   **Mode**: Debug
+    *   **Subtask 3.2: Review Client-side `--verbose` Output**
+        *   **Goal**: Confirm TTFT logging is present and accurate.
+        *   **Action**: Examine the output of `ollama run --verbose` for the "Time to first token" metric.
+        *   **Mode**: Debug
+    *   **Subtask 3.3: Review Server Logs**
+        *   **Goal**: Confirm the new truncation and request ID logs are present, accurate, and correlatable.
+        *   **Action**: Monitor server logs (e.g., by running `ollama serve` in a separate terminal or directing logs to a file) and filter for the new log messages, verifying `requestID` consistency and truncation details.
+        *   **Mode**: Debug
+
+### Phase 4: Documentation Updates
+
+*   **Objective**: Update project documentation to reflect the completed logging enhancements.
+*   **Subtasks**:
+    *   **Subtask 4.1: Update `ISSUE.md`**
+        *   **Goal**: Document the problem diagnosis, root cause, and resolution for the logging issues.
+        *   **Mode**: Architect
+    *   **Subtask 4.2: Update `PLAN.md`**
+        *   **Goal**: Detail the implementation steps, subtasks, and current status of these logging enhancements.
+        *   **Mode**: Architect
+    *   **Subtask 4.3: Update `TODO.md`**
+        *   **Goal**: Mark these new tasks as completed.
+        *   **Mode**: Architect
+
+### Mermaid Diagram: Enhanced Logging Flow
+
+```mermaid
+graph TD
+    A[API Request (Generate/Chat)] --> B{Generate Unique Request ID}
+    B --> C[Add Request ID to Context]
+    C --> D[Call calculateAndSetDynamicNumCtx]
+    D --> E[Log Dynamic NumCtx with Request ID]
+    E --> F[Call chatPrompt for Message Preparation]
+    F --> G{Context Truncation Logic}
+    G -- Before Truncation --> H[Log "Before Truncation" with Request ID]
+    G -- After Truncation --> I[Log "After Truncation" with Request ID, Final Length, Tokens Removed]
+    I --> J[Scheduler Processes Request]
+    J --> K[Model Inference]
+    K --> L[Client Receives First Token]
+    L --> M[Client Logs "Time to First Token" with Request ID (Future)]
+    M --> N[Correlate Client & Server Logs using Request ID]
+```

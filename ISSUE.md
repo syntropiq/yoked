@@ -324,3 +324,34 @@ The solution involves modifying the scheduler to explicitly unload existing mode
 3.  **Runner Initialization:** Ensure the `llm.NewLlamaServer` and subsequent runner initialization correctly use the provided `NumCtx` to set the KV cache size.
 
 This approach ensures that the model's KV cache is always "ample enough" for the intended inference, as it will be precisely sized to the dynamically calculated context length, thereby minimizing context loss.
+
+---
+
+# Issue: Incomplete Logging for "Time to First Token" Degradation Diagnosis
+
+## Problem Description
+
+During the verification of the "Time to First Token" (TTFT) degradation diagnosis system (Subtask 3.3 in `PLAN.md`), two critical deficiencies in the current logging implementation were identified:
+
+1.  **Incomplete Truncation Logging**: The system logs when a context size check occurs before truncation, but it lacks detailed logging *after* truncation, specifically showing the final truncated length and the exact amount of context that was removed. This information is crucial for understanding how context growth/truncation impacts TTFT degradation.
+2.  **Missing Request ID Population**: Server-side logs attempt to use a `requestID` from the context for correlation, but this `requestID` is not being populated anywhere in the request lifecycle. This makes it difficult to correlate client-side TTFT measurements with specific server-side events like dynamic `NumCtx` calculations or truncation events.
+
+These issues hinder effective diagnosis and make it challenging to fully assess the impact of dynamic KV cache sizing and per-request model unloading on TTFT.
+
+## Proposed Solution Overview: Enhance Logging for TTFT Degradation Diagnosis
+
+The proposed solution involves implementing comprehensive logging for context truncation and ensuring proper request ID correlation across client and server logs.
+
+### Key Changes:
+
+1.  **Enhance Server-Side Truncation Logging**:
+    *   Add detailed log entries in `server/prompt.go` after any context truncation occurs.
+    *   These logs will include the final token count, original token count, and the number of tokens "lopped off" (removed).
+    *   The `requestID` will be included for correlation.
+
+2.  **Implement Request ID Population**:
+    *   Generate a unique `requestID` for each incoming API request in `server/routes.go`.
+    *   Propagate this `requestID` through the request's `context.Context` using `context.WithValue`.
+    *   Ensure all relevant server-side logs (e.g., dynamic `NumCtx` calculation, truncation events) include this `requestID`.
+
+This approach will provide the necessary diagnostic information to accurately assess TTFT degradation and the behavior of dynamic context management.
